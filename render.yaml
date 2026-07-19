@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: lemtik-relationship-api
+    env: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        sync: false
+      - key: RELATIONSHIP_API_KEYS
+        sync: false
+      - key: RELATIONSHIP_ALLOW_DEV_AUTH
+        value: "false"
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: OSINT_BRAIN_URL
+        sync: false
+      - key: MAIN_AGENT_URL
+        sync: false
+      - key: AUTONOMOUS_CONTROL_URL
+        sync: false
+      - key: INVENTORY_SERVICE_URL
+        sync: false
+      - key: PROXIMITY_URL
+        sync: false
+      - key: ROUTE_CALCULATOR_URL
+        sync: false
+      - key: OSINT_BRAIN_INTERNAL_KEY
+        sync: false
+      - key: MASTER_AI_INTERNAL_KEY
+        sync: false
+      - key: AUTONOMOUS_CONTROL_INTERNAL_KEY
+        sync: false
+      - key: INVENTORY_INTERNAL_KEY
+        sync: false
+      - key: PROXIMITY_INTERNAL_KEY
+        sync: false
+      - key: ROUTE_CALCULATOR_INTERNAL_KEY
+        sync: false
