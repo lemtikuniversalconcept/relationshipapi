@@ -30,11 +30,29 @@ import {
   infrastructureRegisterSchema,
   infrastructureQuerySchema,
   osintTaskSchema,
+  qwenAnalyzeIncidentSchema,
+  qwenAnalyzeImageSchema,
+  qwenApprovalSchema,
+  qwenProcessRadioSchema,
+  qwenRecommendResponseSchema,
+  cctvCameraRegisterSchema,
+  cctvStreamStartSchema,
+  cctvStreamStopSchema,
+  cctvReidAnalyzeSchema,
+  cctvTargetPredictSchema,
+  cctvTelemetryIngestSchema,
+  cctvFramesIngestSchema,
+  cctvVisionVerifySchema,
+  cctvJudgementAnalyzeSchema,
+  cctvReidCorrelateSchema,
+  aiGenerateSummarySchema,
   toBool,
   toNumber
 } from './schemas';
 import {
   findRelationshipsByEntity,
+  getAiOperation,
+  getAiApproval,
   findAutonomousLog,
   getApproval,
   getBridge,
@@ -47,6 +65,11 @@ import {
   listEntities,
   listGraphEvents,
   listAutonomousLogs,
+  listAiOperations,
+  listAiApprovals,
+  listAiLogs,
+  getAiLog,
+  saveAiLog,
   listIncidents,
   listBridges,
   getInventoryAlert,
@@ -84,6 +107,11 @@ import {
   processMasterAiRequest,
   processMasterAiSynthesise,
   processMasterAiTriage,
+  processQwenAnalyzeIncident,
+  processQwenAnalyzeImage,
+  processQwenApproval,
+  processQwenRadio,
+  processQwenRecommendResponse,
   orchestrateIncidentCreate,
   runAnalysis
 } from './orchestrator';
@@ -160,6 +188,16 @@ app.addHook('onRequest', async (request, reply) => {
   bucket.set(ip, state);
   if (state.count > 120) {
     return reply.code(429).send({ status: 'error', error: 'Rate limit exceeded' });
+  }
+});
+
+app.addHook('preValidation', async (request) => {
+  const path = request.raw.url || request.url || '';
+  if (!path.startsWith('/ai/') || request.method !== 'POST') return;
+  try {
+    (request as any).aiInboundPayload = JSON.parse(JSON.stringify(request.body || {}));
+  } catch {
+    (request as any).aiInboundPayload = request.body || {};
   }
 });
 
@@ -276,8 +314,74 @@ function requireRole(principal: RequestPrincipal, checker: (role?: string) => bo
   }
 }
 
+function isAiGatewayRole(role?: string): boolean {
+  return role === 'operator' || role === 'admin';
+}
+
+function matchesAiLogFilter(log: Record<string, unknown>, query: Record<string, unknown>, org: string): boolean {
+  if (org && String(log.org_id || '') !== org) return false;
+  if (query.request_id && String(log.request_id || '') !== String(query.request_id)) return false;
+  if (query.operator_id && String(log.operator_id || '') !== String(query.operator_id)) return false;
+  if (query.endpoint && String(log.endpoint || '') !== String(query.endpoint)) return false;
+  if (query.user_decision && String(log.user_decision || '') !== String(query.user_decision)) return false;
+  return true;
+}
+
+function summarizeAiLogs(logs: Array<Record<string, unknown>>) {
+  const total = logs.length;
+  const fallbackCount = logs.filter((log) => Boolean(log.output_data && typeof log.output_data === 'object' && (log.output_data as Record<string, unknown>).meta && (log.output_data as Record<string, unknown>).meta?.fallback_used)).length;
+  const byEndpoint = new Map<string, number>();
+  const byModel = new Map<string, number>();
+  const byDecision = new Map<string, number>();
+  const byOperator = new Map<string, number>();
+  let latestAt: string | null = null;
+
+  for (const log of logs) {
+    const endpoint = String(log.endpoint || 'unknown');
+    const model = String(log.model_used || 'unknown');
+    const decision = String(log.user_decision || 'n/a');
+    const operator = String(log.operator_id || 'unknown');
+    byEndpoint.set(endpoint, (byEndpoint.get(endpoint) || 0) + 1);
+    byModel.set(model, (byModel.get(model) || 0) + 1);
+    byDecision.set(decision, (byDecision.get(decision) || 0) + 1);
+    byOperator.set(operator, (byOperator.get(operator) || 0) + 1);
+    const updatedAt = String(log.updated_at || log.created_at || '');
+    if (updatedAt && (!latestAt || updatedAt > latestAt)) {
+      latestAt = updatedAt;
+    }
+  }
+
+  return {
+    total,
+    fallback_count: fallbackCount,
+    fallback_rate: total ? Number((fallbackCount / total).toFixed(3)) : 0,
+    by_endpoint: Object.fromEntries(byEndpoint.entries()),
+    by_model: Object.fromEntries(byModel.entries()),
+    by_decision: Object.fromEntries(byDecision.entries()),
+    by_operator: Object.fromEntries(byOperator.entries()),
+    latest_at: latestAt
+  };
+}
+
+function csvEscape(value: unknown): string {
+  const text = String(value ?? '');
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function aiLogsToCsv(logs: Array<Record<string, unknown>>): string {
+  const headers = ['id', 'org_id', 'request_id', 'operator_id', 'prompt_version', 'model_used', 'endpoint', 'user_decision', 'created_at', 'updated_at'];
+  const rows = [headers.join(',')];
+  for (const log of logs) {
+    rows.push(headers.map((header) => csvEscape((log as Record<string, unknown>)[header])).join(','));
+  }
+  return `${rows.join('\n')}\n`;
+}
+
 async function serviceHealthSnapshot() {
-  const services: ServiceName[] = ['osint', 'aiAnalysis', 'mainAgent', 'autonomous', 'inventory', 'proximity', 'routeCalculator'];
+  const services: ServiceName[] = ['osint', 'aiAnalysis', 'qwen', 'mainAgent', 'autonomous', 'inventory', 'proximity', 'routeCalculator', 'cctv'];
   const entries = await Promise.all(services.map(async (service) => [service, await getServiceHealth(service)] as const));
   const serviceStatus = Object.fromEntries(entries);
   const missing = services.filter((service) => !config.services[service].baseUrl);
@@ -1499,6 +1603,7 @@ app.addHook('onResponse', async (request, reply) => {
   const principal = request.principal as RequestPrincipal | undefined;
   const request_id = String(request.headers['x-request-id'] || request.id);
   const statusCode = Number(reply.statusCode || 0);
+  const aiAudit = (request as any).aiAudit || {};
   const audit = {
     id: crypto.randomUUID(),
     request_id,
@@ -1513,6 +1618,14 @@ app.addHook('onResponse', async (request, reply) => {
     actor_id: principal?.actor_id,
     actor_role: principal?.actor_role,
     service_calls: (request as any).serviceCalls || [],
+    ai_endpoint: aiAudit.ai_endpoint,
+    ai_operation_id: aiAudit.ai_operation_id,
+    ai_prompt_version: aiAudit.ai_prompt_version,
+    ai_model: aiAudit.ai_model,
+    ai_confidence: aiAudit.ai_confidence,
+    ai_recommendation: aiAudit.ai_recommendation,
+    ai_operator_id: aiAudit.ai_operator_id,
+    ai_fallback_used: aiAudit.ai_fallback_used,
     success: statusCode < 400,
     timestamp: new Date().toISOString()
   };
@@ -1520,6 +1633,50 @@ app.addHook('onResponse', async (request, reply) => {
     pushAudit(audit, config.auditLogPath);
   } catch (error) {
     request.log.error({ error }, 'Failed to write audit log');
+  }
+
+  const aiLog = (request as any).aiLog;
+  if (aiLog) {
+    try {
+      saveAiLog({
+        id: String(aiLog.id || crypto.randomUUID()),
+        org_id: aiLog.org_id,
+        request_id: String(aiLog.request_id || request_id),
+        operator_id: aiLog.operator_id,
+        prompt_version: aiLog.prompt_version,
+        model_used: aiLog.model_used,
+        endpoint: String(aiLog.endpoint || request.url),
+        input_data: (aiLog.input_data as Record<string, unknown>) || {},
+        output_data: (aiLog.output_data as Record<string, unknown>) || {},
+        user_decision: aiLog.user_decision,
+        created_at: String(aiLog.created_at || new Date().toISOString()),
+        updated_at: new Date().toISOString()
+      });
+    } catch (error) {
+      request.log.error({ error }, 'Failed to write AI log');
+    }
+  } else if ((request as any).aiInboundPayload && request.url.startsWith('/ai/')) {
+    try {
+      saveAiLog({
+        id: crypto.randomUUID(),
+        org_id: principal?.org_id,
+        request_id,
+        operator_id: principal?.actor_id || principal?.sub,
+        prompt_version: config.qwenPromptVersion,
+        model_used: config.qwenModel,
+        endpoint: request.url,
+        input_data: (request as any).aiInboundPayload || {},
+        output_data: {
+          status_code: statusCode,
+          success: statusCode < 400
+        },
+        user_decision: 'n/a',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      });
+    } catch (error) {
+      request.log.error({ error }, 'Failed to write fallback AI log');
+    }
   }
 });
 
@@ -1536,10 +1693,76 @@ async function recordServiceCall(request: any, label: string): Promise<void> {
   (request as any).serviceCalls.push(label);
 }
 
+function validateAiBody<T>(schema: { safeParse: (value: unknown) => { success: boolean; data?: T; error?: any } }) {
+  return async (request: any, reply: any) => {
+    const parsed = schema.safeParse(request.body || {});
+    if (!parsed.success) {
+      return reply.code(400).send({
+        status: 'error',
+        error: 'Invalid AI request payload',
+        details: parsed.error?.flatten ? parsed.error.flatten() : parsed.error
+      });
+    }
+    request.aiValidatedBody = parsed.data;
+  };
+}
+
+function validateBodySchema<T>(schema: { safeParse: (value: unknown) => { success: boolean; data?: T; error?: any } }, label = 'request') {
+  return async (request: any, reply: any) => {
+    const parsed = schema.safeParse(request.body || {});
+    if (!parsed.success) {
+      return reply.code(400).send({
+        status: 'error',
+        error: `Invalid ${label} payload`,
+        details: parsed.error?.flatten ? parsed.error.flatten() : parsed.error
+      });
+    }
+    request.validatedBody = parsed.data;
+  };
+}
+
+function setAiLog(request: any, aiLog: {
+  org_id?: string;
+  request_id: string;
+  operator_id?: string;
+  prompt_version?: string;
+  model_used?: string;
+  endpoint: string;
+  input_data: Record<string, unknown>;
+  output_data: Record<string, unknown>;
+  user_decision?: string;
+}) {
+  request.aiLog = {
+    id: crypto.randomUUID(),
+    created_at: new Date().toISOString(),
+    ...aiLog
+  };
+}
+
+async function proxyCctvRequest(
+  request: any,
+  servicePath: string,
+  method: 'GET' | 'POST',
+  body?: unknown
+): Promise<Record<string, unknown>> {
+  const result = await callService({
+    service: 'cctv',
+    path: servicePath,
+    method,
+    body
+  });
+  (request as any).serviceCalls = [...((request as any).serviceCalls || []), 'cctv'];
+  return {
+    status: result.ok ? 'success' : 'failed',
+    data: result.data,
+    meta: { degraded: result.fallback, service: 'cctv' }
+  };
+}
+
 app.get(['/health', '/v1/health', '/api/v1/health'], async () => {
   const bridges = listBridges();
   const devices = listDevices();
-  const services: ServiceName[] = ['osint', 'aiAnalysis', 'mainAgent', 'autonomous', 'inventory', 'proximity', 'routeCalculator'];
+  const services: ServiceName[] = ['osint', 'aiAnalysis', 'mainAgent', 'autonomous', 'inventory', 'proximity', 'routeCalculator', 'cctv'];
   const serviceStatus = Object.fromEntries(
     services.map((service) => [
       service,
@@ -1587,7 +1810,7 @@ app.get(['/health', '/v1/health', '/api/v1/health'], async () => {
 
 app.get(['/health/:service', '/api/v1/health/:service'], async (request, reply) => {
   const service = String((request.params as Record<string, unknown>).service || '');
-  const allowed = new Set(['osint', 'aiAnalysis', 'mainAgent', 'autonomous', 'inventory', 'proximity', 'routeCalculator']);
+  const allowed = new Set(['osint', 'aiAnalysis', 'qwen', 'mainAgent', 'autonomous', 'inventory', 'proximity', 'routeCalculator', 'cctv']);
   if (!allowed.has(service)) {
     return reply.code(404).send({ status: 'error', error: 'Unknown service' });
   }
@@ -1600,7 +1823,7 @@ app.get(['/health/:service', '/api/v1/health/:service'], async (request, reply) 
 
 app.get(['/ready', '/v1/ready', '/api/v1/ready'], async (_request, reply) => {
   const services = await serviceHealthSnapshot();
-  const upstreams = ['osint', 'aiAnalysis', 'mainAgent', 'autonomous', 'inventory', 'proximity', 'routeCalculator'];
+  const upstreams = ['osint', 'aiAnalysis', 'mainAgent', 'autonomous', 'inventory', 'proximity', 'routeCalculator', 'cctv'];
   const healthyCount = upstreams.filter((name) => (services as any)[name]?.ok === true).length;
   const requiredHealthy = Math.min(4, upstreams.length);
   const ready = healthyCount >= requiredHealthy;
@@ -2891,7 +3114,35 @@ app.post(['/api/v1/incidents/:id/dispatch', '/incidents/:id/dispatch'], async (r
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   const body = (request.body as Record<string, unknown>) || {};
-  const approvedActions = Array.isArray(body.approved_actions) ? body.approved_actions : [];
+  let approvedActions = Array.isArray(body.approved_actions) ? body.approved_actions : [];
+  const aiApprovalId = body.ai_approval_id ? String(body.ai_approval_id) : '';
+  const aiOperationId = body.ai_operation_id ? String(body.ai_operation_id) : '';
+  if (!approvedActions.length && (aiApprovalId || aiOperationId)) {
+    const aiApproval = aiApprovalId
+      ? getAiApproval(aiApprovalId)
+      : listAiApprovals(100).reverse().find((record) => record.operation_id === aiOperationId);
+    const approvedPayload = aiApproval?.approved_payload;
+    if (aiApproval && (aiApproval.decision === 'approved' || aiApproval.decision === 'modified')) {
+      const payloadActions = approvedPayload && typeof approvedPayload === 'object'
+        ? (Array.isArray((approvedPayload as Record<string, unknown>).approved_actions)
+          ? (approvedPayload as Record<string, unknown>).approved_actions
+          : Array.isArray((approvedPayload as Record<string, unknown>).actions)
+            ? (approvedPayload as Record<string, unknown>).actions
+            : [])
+        : [];
+      approvedActions = payloadActions;
+      (request as any).aiAudit = {
+        ai_endpoint: '/incidents/dispatch',
+        ai_operation_id: aiApproval.operation_id,
+        ai_prompt_version: config.qwenPromptVersion,
+        ai_model: config.qwenModel,
+        ai_confidence: undefined,
+        ai_recommendation: `dispatch_from_${aiApproval.decision}`,
+        ai_operator_id: aiApproval.approved_by,
+        ai_fallback_used: false
+      };
+    }
+  }
   if (!approvedActions.length) {
     return reply.code(400).send({ status: 'error', error: 'approved_actions is required' });
   }
@@ -2928,6 +3179,318 @@ app.get(['/masterai/health', '/api/v1/masterai/health'], async () => {
       path: hasExternalBackend('supabase') ? config.supabaseUrl : null
     }
   };
+});
+
+app.get(['/ai/health', '/api/v1/ai/health'], async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  const upstream = await getServiceHealth('qwen');
+  return {
+    status: 'success',
+    service: 'qwen',
+    configured: Boolean(config.services.qwen.baseUrl),
+    healthy: upstream.ok && !upstream.fallback,
+    model: config.qwenModel,
+    prompt_version: config.qwenPromptVersion,
+    upstream
+  };
+});
+
+app.post(['/ai/analyze-incident', '/api/v1/ai/analyze-incident'], {
+  preValidation: validateAiBody(qwenAnalyzeIncidentSchema)
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:write');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).aiValidatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const result = await processQwenAnalyzeIncident(principal, { ...body, org_id: org }, org);
+  (request as any).serviceCalls = ['qwen'];
+  (request as any).aiAudit = {
+    ...((result as any).meta || {}),
+    ai_endpoint: '/ai/analyze-incident',
+    ai_operation_id: (result as any).meta?.ai_operation_id,
+    ai_prompt_version: (result as any).meta?.prompt_version || config.qwenPromptVersion,
+    ai_model: (result as any).meta?.model || config.qwenModel,
+    ai_confidence: (result as any).meta?.confidence,
+    ai_recommendation: (result as any).meta?.recommendation,
+    ai_operator_id: (result as any).meta?.operator_id,
+    ai_fallback_used: Boolean((result as any).meta?.fallback_used)
+  };
+  setAiLog(request, {
+    org_id: org,
+    request_id: String(body.request_id || request.id),
+    operator_id: String((result as any).meta?.operator_id || principal.sub),
+    prompt_version: String((result as any).meta?.prompt_version || config.qwenPromptVersion),
+    model_used: String((result as any).meta?.model || config.qwenModel),
+    endpoint: '/ai/analyze-incident',
+    input_data: body,
+    output_data: result as Record<string, unknown>,
+    user_decision: 'n/a'
+  });
+  return result;
+});
+
+app.post(['/ai/analyze-image', '/api/v1/ai/analyze-image'], {
+  preValidation: validateAiBody(qwenAnalyzeImageSchema)
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:write');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).aiValidatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const result = await processQwenAnalyzeImage(principal, { ...body, org_id: org }, org);
+  (request as any).serviceCalls = ['qwen'];
+  (request as any).aiAudit = {
+    ...((result as any).meta || {}),
+    ai_endpoint: '/ai/analyze-image',
+    ai_operation_id: (result as any).meta?.ai_operation_id,
+    ai_prompt_version: (result as any).meta?.prompt_version || config.qwenPromptVersion,
+    ai_model: (result as any).meta?.model || config.qwenModel,
+    ai_confidence: (result as any).meta?.confidence,
+    ai_recommendation: (result as any).meta?.recommendation,
+    ai_operator_id: (result as any).meta?.operator_id,
+    ai_fallback_used: Boolean((result as any).meta?.fallback_used)
+  };
+  setAiLog(request, {
+    org_id: org,
+    request_id: String(body.request_id || request.id),
+    operator_id: String((result as any).meta?.operator_id || principal.sub),
+    prompt_version: String((result as any).meta?.prompt_version || config.qwenPromptVersion),
+    model_used: String((result as any).meta?.model || config.qwenModel),
+    endpoint: '/ai/analyze-image',
+    input_data: body,
+    output_data: result as Record<string, unknown>,
+    user_decision: 'n/a'
+  });
+  return result;
+});
+
+app.post(['/ai/process-radio', '/api/v1/ai/process-radio'], {
+  preValidation: validateAiBody(qwenProcessRadioSchema)
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:write');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).aiValidatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const result = await processQwenRadio(principal, { ...body, org_id: org }, org);
+  (request as any).serviceCalls = ['qwen'];
+  (request as any).aiAudit = {
+    ...((result as any).meta || {}),
+    ai_endpoint: '/ai/process-radio',
+    ai_operation_id: (result as any).meta?.ai_operation_id,
+    ai_prompt_version: (result as any).meta?.prompt_version || config.qwenPromptVersion,
+    ai_model: (result as any).meta?.model || config.qwenModel,
+    ai_confidence: (result as any).meta?.confidence,
+    ai_recommendation: (result as any).meta?.recommendation,
+    ai_operator_id: (result as any).meta?.operator_id,
+    ai_fallback_used: Boolean((result as any).meta?.fallback_used)
+  };
+  setAiLog(request, {
+    org_id: org,
+    request_id: String(body.request_id || request.id),
+    operator_id: String((result as any).meta?.operator_id || principal.sub),
+    prompt_version: String((result as any).meta?.prompt_version || config.qwenPromptVersion),
+    model_used: String((result as any).meta?.model || config.qwenModel),
+    endpoint: '/ai/process-radio',
+    input_data: body,
+    output_data: result as Record<string, unknown>,
+    user_decision: 'n/a'
+  });
+  return result;
+});
+
+app.post(['/ai/recommend-response', '/api/v1/ai/recommend-response'], {
+  preValidation: validateAiBody(qwenRecommendResponseSchema)
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:write');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).aiValidatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const result = await processQwenRecommendResponse(principal, { ...body, org_id: org }, org);
+  (request as any).serviceCalls = ['qwen'];
+  (request as any).aiAudit = {
+    ...((result as any).meta || {}),
+    ai_endpoint: '/ai/recommend-response',
+    ai_operation_id: (result as any).meta?.ai_operation_id,
+    ai_prompt_version: (result as any).meta?.prompt_version || config.qwenPromptVersion,
+    ai_model: (result as any).meta?.model || config.qwenModel,
+    ai_confidence: (result as any).meta?.confidence,
+    ai_recommendation: (result as any).meta?.recommendation,
+    ai_operator_id: (result as any).meta?.operator_id,
+    ai_fallback_used: Boolean((result as any).meta?.fallback_used)
+  };
+  setAiLog(request, {
+    org_id: org,
+    request_id: String(body.request_id || request.id),
+    operator_id: String((result as any).meta?.operator_id || principal.sub),
+    prompt_version: String((result as any).meta?.prompt_version || config.qwenPromptVersion),
+    model_used: String((result as any).meta?.model || config.qwenModel),
+    endpoint: '/ai/recommend-response',
+    input_data: (result as any).meta?.synthesized_request || body,
+    output_data: result as Record<string, unknown>,
+    user_decision: 'n/a'
+  });
+  return result;
+});
+
+app.post(['/ai/approve', '/api/v1/ai/approve'], {
+  preValidation: validateAiBody(qwenApprovalSchema)
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:write');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).aiValidatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const result = await processQwenApproval(principal, { ...body, org_id: org }, org);
+  (request as any).serviceCalls = ['qwen'];
+  (request as any).aiAudit = {
+    ...((result as any).meta || {}),
+    ai_endpoint: '/ai/approve',
+    ai_operation_id: (result as any).data?.operation_id || body.operation_id,
+    ai_prompt_version: config.qwenPromptVersion,
+    ai_model: config.qwenModel,
+    ai_confidence: body.confidence ? toNumber(body.confidence, 0) : undefined,
+    ai_recommendation: String(body.decision || 'approved'),
+    ai_operator_id: String(body.approved_by || principal.sub),
+    ai_fallback_used: false
+  };
+  setAiLog(request, {
+    org_id: org,
+    request_id: String(body.request_id || request.id),
+    operator_id: String(body.approved_by || principal.sub),
+    prompt_version: config.qwenPromptVersion,
+    model_used: config.qwenModel,
+    endpoint: '/ai/approve',
+    input_data: body,
+    output_data: result as Record<string, unknown>,
+    user_decision: String(body.decision || 'approved')
+  });
+  return result;
+});
+
+app.get(['/ai/operations', '/api/v1/ai/operations'], async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  const query = request.query as Record<string, unknown>;
+  const limit = Math.max(1, Math.min(200, toNumber(query.limit, 50) || 50));
+  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  return {
+    status: 'success',
+    data: listAiOperations(limit).filter((operation) => !org || operation.org_id === org)
+  };
+});
+
+app.get(['/ai/approvals', '/api/v1/ai/approvals'], async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  const query = request.query as Record<string, unknown>;
+  const limit = Math.max(1, Math.min(200, toNumber(query.limit, 50) || 50));
+  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  return {
+    status: 'success',
+    data: listAiApprovals(limit).filter((approval) => !org || approval.org_id === org)
+  };
+});
+
+app.get(['/ai/approvals/:id', '/api/v1/ai/approvals/:id'], async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  const approvalId = String((request.params as Record<string, unknown>).id);
+  const approval = getAiApproval(approvalId);
+  if (!approval) {
+    return reply.code(404).send({ status: 'error', error: 'AI approval not found' });
+  }
+  if (approval.org_id !== buildOrg(principal, approval.org_id)) {
+    return reply.code(403).send({ status: 'error', error: 'Forbidden' });
+  }
+  return { status: 'success', data: approval };
+});
+
+app.get(['/ai/logs', '/api/v1/ai/logs'], async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const query = request.query as Record<string, unknown>;
+  const limit = Math.max(1, Math.min(250, toNumber(query.limit, 100) || 100));
+  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  return {
+    status: 'success',
+    data: listAiLogs(limit).filter((log) => matchesAiLogFilter(log as Record<string, unknown>, query, org))
+  };
+});
+
+app.get(['/ai/logs/summary', '/api/v1/ai/logs/summary'], async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const query = request.query as Record<string, unknown>;
+  const limit = Math.max(1, Math.min(500, toNumber(query.limit, 200) || 200));
+  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const logs = listAiLogs(limit).filter((log) => matchesAiLogFilter(log as Record<string, unknown>, query, org));
+  return {
+    status: 'success',
+    data: {
+      org_id: org,
+      sample_size: logs.length,
+      summary: summarizeAiLogs(logs as Array<Record<string, unknown>>)
+    }
+  };
+});
+
+app.get(['/ai/logs/export', '/api/v1/ai/logs/export'], async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const query = request.query as Record<string, unknown>;
+  const limit = Math.max(1, Math.min(1000, toNumber(query.limit, 250) || 250));
+  const format = String(query.format || 'json').toLowerCase();
+  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const logs = listAiLogs(limit).filter((log) => matchesAiLogFilter(log as Record<string, unknown>, query, org));
+  if (format === 'csv') {
+    reply.header('content-type', 'text/csv; charset=utf-8');
+    reply.header('content-disposition', `attachment; filename="ai-logs-${org}-${Date.now()}.csv"`);
+    return aiLogsToCsv(logs as Array<Record<string, unknown>>);
+  }
+  return {
+    status: 'success',
+    data: {
+      org_id: org,
+      sample_size: logs.length,
+      logs
+    }
+  };
+});
+
+app.get(['/ai/logs/:id', '/api/v1/ai/logs/:id'], async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const logId = String((request.params as Record<string, unknown>).id);
+  const log = getAiLog(logId);
+  if (!log) {
+    return reply.code(404).send({ status: 'error', error: 'AI log not found' });
+  }
+  if (log.org_id !== buildOrg(principal, log.org_id)) {
+    return reply.code(403).send({ status: 'error', error: 'Forbidden' });
+  }
+  return { status: 'success', data: log };
+});
+
+app.get(['/ai/operations/:id', '/api/v1/ai/operations/:id'], async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  const operationId = String((request.params as Record<string, unknown>).id);
+  const operation = getAiOperation(operationId);
+  if (!operation) {
+    return reply.code(404).send({ status: 'error', error: 'AI operation not found' });
+  }
+  if (operation.org_id !== buildOrg(principal, operation.org_id)) {
+    return reply.code(403).send({ status: 'error', error: 'Forbidden' });
+  }
+  return { status: 'success', data: operation };
 });
 
 app.post(['/triage', '/api/v1/triage'], async (request) => {
@@ -3047,6 +3610,179 @@ app.post(['/query', '/api/v1/query'], async (request) => {
     request_id: body.request_id,
     status: result.ok ? 'success' : 'failed',
     data: result.fallback ? inventoryLocalQuery({ ...body, org_id: org }).data : result.data,
+    meta: { degraded: result.fallback }
+  };
+});
+
+app.get(['/api/v1/cameras'], async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:read');
+  const query = request.query as Record<string, unknown>;
+  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const result = await callService({
+    service: 'cctv',
+    path: org ? `/cameras?org_id=${encodeURIComponent(org)}` : '/cameras',
+    method: 'GET',
+    allowFallback: true
+  });
+  (request as any).serviceCalls = ['cctv'];
+  return {
+    status: result.ok ? 'success' : 'failed',
+    data: result.data,
+    meta: { degraded: result.fallback }
+  };
+});
+
+app.post(['/api/v1/cameras/register'], {
+  preValidation: validateBodySchema(cctvCameraRegisterSchema, 'camera register')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:write');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/cameras/register', 'POST', payload);
+});
+
+app.post(['/api/v1/streams/start'], {
+  preValidation: validateBodySchema(cctvStreamStartSchema, 'stream start')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:write');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/streams/start', 'POST', payload);
+});
+
+app.post(['/api/v1/streams/stop'], {
+  preValidation: validateBodySchema(cctvStreamStopSchema, 'stream stop')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:write');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/streams/stop', 'POST', payload);
+});
+
+app.post(['/api/v1/reid/analyze'], {
+  preValidation: validateBodySchema(cctvReidAnalyzeSchema, 'reid analyze')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:read');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/reid/analyze', 'POST', payload);
+});
+
+app.get(['/api/v1/targets/:id'], async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:read');
+  const query = request.query as Record<string, unknown>;
+  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const targetId = String((request.params as Record<string, unknown>).id);
+  const result = await callService({
+    service: 'cctv',
+    path: `/targets/${encodeURIComponent(targetId)}${org ? `?org_id=${encodeURIComponent(org)}` : ''}`,
+    method: 'GET',
+    allowFallback: true
+  });
+  (request as any).serviceCalls = ['cctv'];
+  return {
+    status: result.ok ? 'success' : 'failed',
+    data: result.data,
+    meta: { degraded: result.fallback }
+  };
+});
+
+app.post(['/api/v1/targets/predict'], {
+  preValidation: validateBodySchema(cctvTargetPredictSchema, 'target predict')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:read');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/targets/predict', 'POST', payload);
+});
+
+app.post(['/api/v1/telemetry/ingest'], {
+  preValidation: validateBodySchema(cctvTelemetryIngestSchema, 'telemetry ingest')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:write');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/telemetry/ingest', 'POST', payload);
+});
+
+app.post(['/api/v1/frames/ingest'], {
+  preValidation: validateBodySchema(cctvFramesIngestSchema, 'frames ingest')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:write');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/frames/ingest', 'POST', payload);
+});
+
+app.post(['/api/v1/vision/verify'], {
+  preValidation: validateBodySchema(cctvVisionVerifySchema, 'vision verify')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:write');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/vision/verify', 'POST', payload);
+});
+
+app.post(['/api/v1/judgement/analyze'], {
+  preValidation: validateBodySchema(cctvJudgementAnalyzeSchema, 'judgement analyze')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:write');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/judgement/analyze', 'POST', payload);
+});
+
+app.post(['/api/v1/reid/correlate'], {
+  preValidation: validateBodySchema(cctvReidCorrelateSchema, 'reid correlate')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:read');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  return proxyCctvRequest(request, '/reid/correlate', 'POST', payload);
+});
+
+app.post(['/api/v1/ai/generate-summary'], {
+  preValidation: validateBodySchema(aiGenerateSummarySchema, 'generate summary')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:write');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  const payload = { ...body, org_id: org };
+  const result = await callService({
+    service: 'mainAgent',
+    path: '/ai/generate-summary',
+    method: 'POST',
+    body: payload,
+    allowFallback: true
+  });
+  (request as any).serviceCalls = ['mainAgent'];
+  return {
+    status: result.ok ? 'success' : 'failed',
+    summary: result.data?.summary || result.data,
     meta: { degraded: result.fallback }
   };
 });

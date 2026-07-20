@@ -185,6 +185,70 @@ export const routeUpdateSchema = routeCalculateSchema.extend({
   route_id: z.string().optional()
 }).passthrough();
 
+export const cctvCameraRegisterSchema = z.object({
+  request_type: z.literal('register_camera'),
+  request_id: z.string(),
+  org_id: z.string(),
+  camera: z
+    .object({
+      id: z.string().optional(),
+      name: z.string().optional(),
+      location: z.string().optional(),
+      stream_url: z.string().optional(),
+      rtsp_url: z.string().optional(),
+      device_id: z.string().optional(),
+      status: z.string().optional(),
+      metadata: z.record(z.any()).optional()
+    })
+    .passthrough()
+});
+
+export const cctvStreamStartSchema = z.object({
+  request_type: z.literal('start_stream'),
+  request_id: z.string(),
+  org_id: z.string(),
+  camera_id: z.string().optional(),
+  stream_id: z.string().optional(),
+  options: z.record(z.any()).optional()
+}).passthrough();
+
+export const cctvStreamStopSchema = z.object({
+  request_type: z.literal('stop_stream'),
+  request_id: z.string(),
+  org_id: z.string(),
+  camera_id: z.string().optional(),
+  stream_id: z.string().optional(),
+  reason: z.string().optional()
+}).passthrough();
+
+export const cctvReidAnalyzeSchema = z.object({
+  request_type: z.literal('reid_analyze'),
+  request_id: z.string(),
+  org_id: z.string(),
+  camera_id: z.string().optional(),
+  frame_id: z.string().optional(),
+  image: z
+    .object({
+      url: z.string().optional(),
+      base64: z.string().optional(),
+      filename: z.string().optional(),
+      mime_type: z.string().optional()
+    })
+    .passthrough()
+    .optional(),
+  context: z.record(z.any()).optional()
+}).passthrough();
+
+export const cctvTargetPredictSchema = z.object({
+  request_type: z.literal('target_predict'),
+  request_id: z.string(),
+  org_id: z.string(),
+  target_id: z.string().optional(),
+  camera_id: z.string().optional(),
+  track_id: z.string().optional(),
+  context: z.record(z.any()).optional()
+}).passthrough();
+
 export const infrastructureRegisterSchema = z.object({
   id: z.string().optional(),
   org_id: z.string().optional(),
@@ -214,6 +278,188 @@ export const aiAnalysisSchema = z.object({
       client_type: z.string().optional()
     })
     .optional()
+});
+
+export const qwenAnalyzeIncidentSchema = z.object({
+  request_type: z.literal('ai_analyze_incident'),
+  request_id: z.string(),
+  org_id: z.string(),
+  incident: incidentSchema,
+  context: z
+    .object({
+      osint_data: z.any().optional(),
+      inventory: z.any().optional(),
+      proximity: z.any().optional(),
+      route_calculator: z.any().optional(),
+      operator_id: z.string().optional(),
+      prompt_version: z.string().optional(),
+      model: z.string().optional()
+    })
+    .optional(),
+  async: z.boolean().optional()
+}).passthrough();
+
+export const qwenAnalyzeImageSchema = z.object({
+  request_type: z.literal('ai_analyze_image'),
+  request_id: z.string(),
+  org_id: z.string(),
+  image: z
+    .object({
+      url: z.string().optional(),
+      base64: z.string().optional(),
+      filename: z.string().optional(),
+      mime_type: z.string().optional(),
+      caption: z.string().optional()
+    })
+    .passthrough(),
+  context: z
+    .object({
+      incident: incidentSchema.optional(),
+      operator_id: z.string().optional(),
+      prompt_version: z.string().optional(),
+      model: z.string().optional(),
+      camera_id: z.string().optional()
+    })
+    .optional(),
+  async: z.boolean().optional()
+}).passthrough();
+
+export const qwenProcessRadioSchema = z.object({
+  request_type: z.literal('ai_process_radio'),
+  request_id: z.string(),
+  org_id: z.string(),
+  radio: z
+    .object({
+      transcript: z.string().optional(),
+      message: z.string().optional(),
+      source: z.string().optional(),
+      channel_id: z.string().optional(),
+      received_at: z.string().optional()
+    })
+    .passthrough(),
+  context: z
+    .object({
+      incident: incidentSchema.optional(),
+      operator_id: z.string().optional(),
+      prompt_version: z.string().optional(),
+      model: z.string().optional()
+    })
+    .optional(),
+  async: z.boolean().optional()
+}).passthrough();
+
+export const qwenRecommendResponseSchema = z.object({
+  request_type: z.literal('ai_recommend_response'),
+  request_id: z.string(),
+  org_id: z.string(),
+  incident: incidentSchema,
+  analysis: z.record(z.any()).optional(),
+  context: z
+    .object({
+      operator_id: z.string().optional(),
+      prompt_version: z.string().optional(),
+      model: z.string().optional(),
+      constraints: z.record(z.any()).optional(),
+      inventory: z.record(z.any()).optional(),
+      proximity: z.record(z.any()).optional(),
+      route_calculator: z.record(z.any()).optional(),
+      osint_data: z.record(z.any()).optional()
+    })
+    .optional(),
+  async: z.boolean().optional()
+}).passthrough();
+
+export const qwenAiEnvelopeSchema = z.object({
+  request_id: z.string(),
+  status: z.string(),
+  data: z.record(z.any()),
+  meta: z.record(z.any()).optional()
+}).passthrough();
+
+export const qwenAnalyzeIncidentResponseSchema = qwenAiEnvelopeSchema.extend({
+  data: z.object({
+    incident_id: z.string(),
+    prompt_version: z.string(),
+    model: z.string(),
+    confidence: z.number().min(0).max(100),
+    recommendation: z.string(),
+    reasoning: z.string().optional(),
+    operator_id: z.string().optional(),
+    analysis: z.record(z.any()).optional(),
+    risk_level: z.string().optional(),
+    suggested_actions: z.array(z.string()).optional()
+  }).passthrough()
+});
+
+export const qwenAnalyzeImageResponseSchema = qwenAiEnvelopeSchema.extend({
+  data: z.object({
+    image_id: z.string().optional(),
+    prompt_version: z.string(),
+    model: z.string(),
+    confidence: z.number().min(0).max(100),
+    recommendation: z.string(),
+    findings: z.array(z.string()).optional(),
+    labels: z.array(z.string()).optional(),
+    summary: z.string().optional(),
+    operator_id: z.string().optional(),
+    incident_id: z.string().optional(),
+    risk_level: z.string().optional()
+  }).passthrough()
+});
+
+export const qwenProcessRadioResponseSchema = qwenAiEnvelopeSchema.extend({
+  data: z.object({
+    transcript: z.string().optional(),
+    prompt_version: z.string(),
+    model: z.string(),
+    confidence: z.number().min(0).max(100),
+    recommendation: z.string(),
+    classification: z.record(z.any()).optional(),
+    summary: z.string().optional(),
+    operator_id: z.string().optional(),
+    action_items: z.array(z.string()).optional()
+  }).passthrough()
+});
+
+export const qwenRecommendResponseResponseSchema = qwenAiEnvelopeSchema.extend({
+  data: z.object({
+    incident_id: z.string(),
+    prompt_version: z.string(),
+    model: z.string(),
+    confidence: z.number().min(0).max(100),
+    recommendation: z.string(),
+    response_plan: z.record(z.any()).optional(),
+    operator_id: z.string().optional(),
+    actions: z.array(z.string()).optional(),
+    risk_level: z.string().optional()
+  }).passthrough()
+});
+
+export const qwenApprovalSchema = z.object({
+  request_type: z.literal('ai_approve'),
+  request_id: z.string(),
+  org_id: z.string(),
+  operation_id: z.string(),
+  decision: z.enum(['approved', 'rejected', 'modified']).default('approved'),
+  approved_by: z.string().optional(),
+  approval_level: z.string().optional(),
+  notes: z.string().optional(),
+  approved_payload: z.record(z.any()).optional()
+}).passthrough();
+
+export const qwenApprovalResponseSchema = qwenAiEnvelopeSchema.extend({
+  data: z.object({
+    approval_id: z.string(),
+    operation_id: z.string(),
+    request_id: z.string(),
+    org_id: z.string(),
+    decision: z.enum(['approved', 'rejected', 'modified']),
+    approved_by: z.string(),
+    approval_level: z.string(),
+    approved_at: z.string(),
+    notes: z.string().optional(),
+    approved_payload: z.record(z.any()).optional()
+  }).passthrough()
 });
 
 export const agentTaskSchema = z.object({
@@ -429,3 +675,63 @@ export function toNumber(value: unknown, fallback?: number): number | undefined 
   }
   return fallback;
 }
+
+export const cctvTelemetryIngestSchema = z.object({
+  request_id: z.string().optional(),
+  org_id: z.string(),
+  camera_id: z.string(),
+  target_id: z.string().optional(),
+  zone: z.string().optional(),
+  event_type: z.string(),
+  event_confidence: z.number().optional()
+}).passthrough();
+
+export const cctvFramesIngestSchema = z.object({
+  request_id: z.string().optional(),
+  org_id: z.string(),
+  camera_id: z.string(),
+  zone: z.string().optional(),
+  event_type: z.string().optional(),
+  event_confidence: z.number().optional(),
+  verify_vision: z.boolean().optional(),
+  frame_data: z.string()
+}).passthrough();
+
+export const cctvVisionVerifySchema = z.object({
+  request_id: z.string().optional(),
+  org_id: z.string(),
+  target_id: z.string().optional(),
+  camera_id: z.string().optional(),
+  event_type: z.string().optional(),
+  snapshots: z.array(z.string()).optional(),
+  incident_context: z.record(z.any()).optional()
+}).passthrough();
+
+export const cctvJudgementAnalyzeSchema = z.object({
+  request_id: z.string().optional(),
+  org_id: z.string(),
+  camera_id: z.string().optional(),
+  target_id: z.string().optional(),
+  voice_transcript: z.string().optional(),
+  snapshots: z.array(z.string()).optional(),
+  use_qwen: z.boolean().optional(),
+  loitering_threshold_seconds: z.number().optional(),
+  incident_context: z.record(z.any()).optional()
+}).passthrough();
+
+export const cctvReidCorrelateSchema = z.object({
+  org_id: z.string(),
+  embedding: z.array(z.number()),
+  threshold: z.number().optional()
+}).passthrough();
+
+export const aiGenerateSummarySchema = z.object({
+  template_id: z.string(),
+  template_title: z.string(),
+  org_id: z.string().optional(),
+  stats: z.record(z.any()).optional(),
+  sections: z.array(z.string()).optional(),
+  range_label: z.string().optional(),
+  commentary: z.string().optional()
+}).passthrough();
+

@@ -1,0 +1,281 @@
+{
+  "req_test_001": {
+    "endpoint": "/ai/analyze-incident",
+    "operation_type": "analyze_incident",
+    "prompt_version": "v1",
+    "model": "qwen-plus",
+    "operator_id": "op1",
+    "confidence": 86,
+    "recommendation": "Escalate to immediate response and notify a supervisor.",
+    "fallback_used": true,
+    "request": {
+      "request_type": "ai_analyze_incident",
+      "request_id": "req_test_001",
+      "org_id": "default",
+      "incident": {
+        "id": "INC-1",
+        "type": "robbery",
+        "severity": 4,
+        "description": "armed robbery at gate A",
+        "location": {
+          "name": "Gate A",
+          "lat": 1,
+          "lng": 2
+        }
+      },
+      "context": {
+        "operator_id": "op1"
+      }
+    },
+    "response": {
+      "request_id": "req_test_001",
+      "status": "success",
+      "data": {
+        "incident_id": "INC-1",
+        "prompt_version": "v1",
+        "model": "qwen-plus",
+        "confidence": 86,
+        "recommendation": "Escalate to immediate response and notify a supervisor.",
+        "reasoning": "Generated locally because Qwen was unavailable or returned an invalid contract.",
+        "operator_id": "op1",
+        "analysis": {
+          "threat_level": "high",
+          "incident_type": "robbery",
+          "escalation_required": true,
+          "armed_threat": true
+        },
+        "risk_level": "high",
+        "suggested_actions": [
+          "Dispatch responders immediately",
+          "Notify supervisor",
+          "Prepare autonomous controls if approved"
+        ]
+      },
+      "meta": {
+        "degraded": true,
+        "fallback_reason": "qwen offline"
+      }
+    }
+  },
+  "req_ai_approve_001": {
+    "approval_id": "aiappr_9npm74t9mrs93mjr",
+    "operation_id": "op_test_001",
+    "decision": "approved",
+    "approved_by": "supervisor_001",
+    "approval_level": "supervisor",
+    "approved_at": "2026-07-19T20:31:11.847Z",
+    "operation": null,
+    "approved_payload": null
+  },
+  "req_img_001": {
+    "endpoint": "/ai/analyze-image",
+    "operation_type": "analyze_image",
+    "prompt_version": "v2",
+    "model": "qwen-vl-plus",
+    "operator_id": "operator_001",
+    "confidence": 92,
+    "recommendation": "Review the image immediately and escalate if a threat is visible.",
+    "fallback_used": true,
+    "request": {
+      "request_type": "ai_analyze_image",
+      "request_id": "req_img_001",
+      "org_id": "default",
+      "image": {
+        "filename": "scene.jpg",
+        "mime_type": "image/jpeg",
+        "caption": "A person standing near a vehicle"
+      },
+      "context": {
+        "operator_id": "operator_001",
+        "prompt_version": "v2",
+        "model": "qwen-vl-plus"
+      }
+    },
+    "response": {
+      "request_id": "req_img_001",
+      "status": "success",
+      "data": {
+        "image_id": "scene.jpg",
+        "prompt_version": "v2",
+        "model": "qwen-vl-plus",
+        "confidence": 92,
+        "recommendation": "Review the image immediately and escalate if a threat is visible.",
+        "findings": [
+          "Potential threat indicators detected",
+          "Manual review recommended"
+        ],
+        "labels": [
+          "threat",
+          "needs_review"
+        ],
+        "summary": "A person standing near a vehicle",
+        "operator_id": "operator_001",
+        "risk_level": "high"
+      },
+      "meta": {
+        "degraded": true,
+        "fallback_reason": "qwen offline"
+      }
+    }
+  },
+  "req_rec_001": {
+    "endpoint": "/ai/recommend-response",
+    "operation_type": "recommend_response",
+    "prompt_version": "v2",
+    "model": "qwen-plus",
+    "operator_id": "operator_001",
+    "confidence": 87,
+    "recommendation": "Approve immediate response, prioritize safety, and keep approval chain active.",
+    "fallback_used": true,
+    "request": {
+      "request_type": "ai_recommend_response",
+      "request_id": "req_rec_001",
+      "org_id": "default",
+      "incident": {
+        "id": "INC-1",
+        "type": "robbery",
+        "severity": 4,
+        "description": "armed robbery reported",
+        "location": {
+          "name": "Gate A",
+          "lat": 6.42,
+          "lng": 3.42
+        }
+      },
+      "analysis": {
+        "threat_assessment": {
+          "threat_level": "high"
+        }
+      },
+      "context": {
+        "operator_id": "operator_001",
+        "prompt_version": "v2",
+        "model": "qwen-plus",
+        "inventory": {
+          "request_id": "fallback-1784542394914",
+          "status": "success",
+          "data": {
+            "officers": {
+              "total": 0,
+              "available": 0,
+              "armed_available": 0,
+              "below_threshold": false
+            },
+            "vehicles": {
+              "total": 0,
+              "available": 0,
+              "below_threshold": false
+            },
+            "weapons": {
+              "pistols_available": 0,
+              "rifles_available": 0,
+              "tasers_available": 0,
+              "below_threshold": false
+            },
+            "ammunition": {
+              "pistol_rounds": 0,
+              "rifle_rounds": 0,
+              "below_threshold": false
+            },
+            "tactical": {
+              "body_armour_available": 0,
+              "radios_available": 0,
+              "first_aid_kits": 0,
+              "below_threshold": false
+            },
+            "fuel_reserve": {
+              "litres": 0,
+              "percentage": 0,
+              "below_threshold": true,
+              "threshold_alert_level": "WARNING"
+            },
+            "cadence": {
+              "officers": {},
+              "vehicles": {}
+            },
+            "active_alerts": 0,
+            "last_updated": "2026-07-20T10:13:14.914Z",
+            "llm_review": {
+              "approved": true,
+              "issues": [],
+              "risk_level": "medium",
+              "missing_fields": [],
+              "recommended_actions": []
+            }
+          },
+          "meta": {
+            "elapsed_ms": 0,
+            "soft_target_ms": 500,
+            "within_soft_target": true,
+            "degraded": true
+          }
+        },
+        "proximity": {
+          "incident_id": "unknown",
+          "search_radius_km": 5,
+          "total_on_shift": 0,
+          "total_candidates_found": 0,
+          "recommended_officers": [],
+          "recommended_vehicles": [],
+          "excluded_officers": [],
+          "summary": {
+            "fastest_responder": null,
+            "fastest_eta_seconds": null,
+            "officers_available_in_area": 0,
+            "officers_recommended": 0,
+            "all_requirements_met": false,
+            "warnings": [
+              "proximity service unavailable"
+            ]
+          }
+        },
+        "route_calculator": {
+          "request_id": "fallback-1784542394914",
+          "status": "success",
+          "data": {
+            "recommended_routing_type": "vehicle",
+            "reasoning": "route calculator unavailable",
+            "routes": [],
+            "infrastructure_recommendations": [],
+            "push_route_to_officers": [],
+            "mapbox_route_geojson": {},
+            "meta": {
+              "total_ms": 0,
+              "degraded": true
+            }
+          }
+        },
+        "osint_data": {}
+      }
+    },
+    "response": {
+      "request_id": "req_rec_001",
+      "status": "success",
+      "data": {
+        "incident_id": "INC-1",
+        "prompt_version": "v2",
+        "model": "qwen-plus",
+        "confidence": 87,
+        "recommendation": "Approve immediate response, prioritize safety, and keep approval chain active.",
+        "response_plan": {
+          "priority": "immediate",
+          "officers_needed": 4,
+          "vehicles_needed": 1,
+          "approval_required": true,
+          "suggested_channel": "command"
+        },
+        "operator_id": "operator_001",
+        "actions": [
+          "Notify supervisor",
+          "Dispatch responders",
+          "Prepare autonomous controls"
+        ],
+        "risk_level": "high"
+      },
+      "meta": {
+        "degraded": true,
+        "fallback_reason": "qwen offline"
+      }
+    }
+  }
+}

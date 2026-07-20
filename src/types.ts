@@ -22,11 +22,13 @@ export type RequestPrincipal = {
 export type ServiceName =
   | 'osint'
   | 'aiAnalysis'
+  | 'qwen'
   | 'mainAgent'
   | 'autonomous'
   | 'inventory'
   | 'proximity'
-  | 'routeCalculator';
+  | 'routeCalculator'
+  | 'cctv';
 
 export type ServiceConfig = {
   name: ServiceName;
@@ -51,8 +53,67 @@ export type AuditEntry = {
   actor_id?: string;
   actor_role?: string;
   service_calls: string[];
+  ai_endpoint?: string;
+  ai_operation_id?: string;
+  ai_prompt_version?: string;
+  ai_model?: string;
+  ai_confidence?: number;
+  ai_recommendation?: string;
+  ai_operator_id?: string;
+  ai_fallback_used?: boolean;
   success: boolean;
   timestamp: string;
+};
+
+export type AiOperationRecord = {
+  operation_id: string;
+  request_id: string;
+  org_id: string;
+  endpoint: string;
+  operation_type: string;
+  prompt_version: string;
+  model: string;
+  operator_id?: string;
+  confidence?: number;
+  recommendation?: string;
+  status: 'queued' | 'success' | 'failed' | 'fallback';
+  fallback_used: boolean;
+  retries: number;
+  request_payload: Record<string, unknown>;
+  response_payload: Record<string, unknown>;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+  duration_ms: number;
+};
+
+export type AiLogRecord = {
+  id: string;
+  org_id?: string;
+  request_id: string;
+  operator_id?: string;
+  prompt_version?: string;
+  model_used?: string;
+  endpoint: string;
+  input_data: Record<string, unknown>;
+  output_data: Record<string, unknown>;
+  user_decision?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AiApprovalRecord = {
+  approval_id: string;
+  request_id: string;
+  org_id: string;
+  operation_id: string;
+  approved_by: string;
+  approval_level: string;
+  decision: 'approved' | 'rejected' | 'modified';
+  notes?: string;
+  approved_payload?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
 };
 
 export type IdempotencyRecord = {

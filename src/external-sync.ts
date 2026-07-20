@@ -13,7 +13,8 @@ function conflictKeyForTable(table: string, record: Record<string, unknown>): st
     infrastructure: ['id'],
     autonomous_logs: ['action_log_id'],
     inventory_alerts: ['alert_id'],
-    graph_snapshots: ['route_id']
+    graph_snapshots: ['route_id'],
+    audit_log: ['id']
   };
   for (const key of candidates[table] || []) {
     if (typeof record[key] === 'string' && record[key]) return key;

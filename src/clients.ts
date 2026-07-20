@@ -21,6 +21,7 @@ type CallOptions = {
   headers?: Record<string, string>;
   timeoutMs?: number;
   allowFallback?: boolean;
+  retries?: number;
 };
 
 function serviceConfig(service: ServiceName) {
@@ -111,6 +112,25 @@ function emptyFallback(service: ServiceName): any {
           meta: { total_ms: 0, degraded: true }
         }
       };
+    case 'cctv':
+      return {
+        request_id: `fallback-${Date.now()}`,
+        status: 'success',
+        data: {
+          cameras: [],
+          camera_count: 0,
+          streams: [],
+          targets: [],
+          reid_results: [],
+          prediction: {
+            target_id: null,
+            confidence: 0,
+            labels: [],
+            summary: 'CCTV perception service unavailable'
+          }
+        },
+        meta: { degraded: true, fallback_reason: 'cctv unavailable' }
+      };
     case 'aiAnalysis':
       return {
         request_id: `fallback-${Date.now()}`,
@@ -141,6 +161,22 @@ function emptyFallback(service: ServiceName): any {
           },
           autonomous_actions_recommended: []
         }
+      };
+    case 'qwen':
+      return {
+        request_id: `fallback-${Date.now()}`,
+        status: 'success',
+        data: {
+          incident_id: 'unknown',
+          prompt_version: 'v1',
+          model: config.qwenModel,
+          confidence: 62,
+          recommendation: 'Use local heuristic guidance until Qwen is available.',
+          reasoning: 'Qwen service unavailable',
+          risk_level: 'medium',
+          actions: ['Review incident manually', 'Notify supervisor if required']
+        },
+        meta: { degraded: true, fallback_reason: 'qwen unavailable' }
       };
     case 'mainAgent':
       return {
@@ -187,7 +223,8 @@ export async function callService<T = unknown>({
   body,
   headers,
   timeoutMs = 8000,
-  allowFallback = true
+  allowFallback = true,
+  retries
 }: CallOptions): Promise<ServiceCallResult<T>> {
   const svc = serviceConfig(service);
   const started = Date.now();
@@ -212,10 +249,17 @@ export async function callService<T = unknown>({
     };
   }
 
-  const retries = Math.max(0, Number.isFinite(config.relationshipApiRetryCount) ? config.relationshipApiRetryCount : 2);
+  const retryCount = Math.max(
+    0,
+    Number.isFinite(retries)
+      ? Number(retries)
+      : Number.isFinite(config.relationshipApiRetryCount)
+        ? config.relationshipApiRetryCount
+        : 2
+  );
   let lastError: unknown;
 
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs || config.relationshipApiTimeoutMs || 8000);
     try {
@@ -244,7 +288,7 @@ export async function callService<T = unknown>({
     } catch (error) {
       lastError = error;
       clearTimeout(timeout);
-      if (attempt < retries) continue;
+      if (attempt < retryCount) continue;
       if (!allowFallback) {
         return {
           ok: false,

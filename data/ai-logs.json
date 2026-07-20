@@ -1,0 +1,356 @@
+[
+  {
+    "id": "29069db9-63c6-4735-aa10-5de9b89ddb1c",
+    "org_id": "default",
+    "request_id": "req_img_001",
+    "operator_id": "operator_001",
+    "prompt_version": "v2",
+    "model_used": "qwen-vl-plus",
+    "endpoint": "/ai/analyze-image",
+    "input_data": {
+      "request_type": "ai_analyze_image",
+      "request_id": "req_img_001",
+      "org_id": "default",
+      "image": {
+        "filename": "scene.jpg",
+        "mime_type": "image/jpeg",
+        "caption": "A person standing near a vehicle"
+      },
+      "context": {
+        "operator_id": "operator_001",
+        "prompt_version": "v2",
+        "model": "qwen-vl-plus"
+      }
+    },
+    "output_data": {
+      "request_id": "req_img_001",
+      "status": "success",
+      "data": {
+        "image_id": "scene.jpg",
+        "prompt_version": "v2",
+        "model": "qwen-vl-plus",
+        "confidence": 92,
+        "recommendation": "Review the image immediately and escalate if a threat is visible.",
+        "findings": [
+          "Potential threat indicators detected",
+          "Manual review recommended"
+        ],
+        "labels": [
+          "threat",
+          "needs_review"
+        ],
+        "summary": "A person standing near a vehicle",
+        "operator_id": "operator_001",
+        "risk_level": "high"
+      },
+      "meta": {
+        "degraded": true,
+        "fallback_reason": "qwen offline",
+        "ai_operation_id": "aio_4dyhzb5pmrt2gsg9",
+        "prompt_version": "v2",
+        "model": "qwen-vl-plus",
+        "confidence": 92,
+        "recommendation": "Review the image immediately and escalate if a threat is visible.",
+        "operator_id": "operator_001",
+        "fallback_used": true,
+        "retries": 3,
+        "duration_ms": 0
+      }
+    },
+    "user_decision": "n/a",
+    "created_at": "2026-07-20T10:13:14.889Z",
+    "updated_at": "2026-07-20T10:13:14.890Z"
+  },
+  {
+    "id": "7e94fd6b-88c9-4d97-bbb4-c484e8e2ea80",
+    "org_id": "default",
+    "request_id": "req_rec_001",
+    "operator_id": "operator_001",
+    "prompt_version": "v2",
+    "model_used": "qwen-plus",
+    "endpoint": "/ai/recommend-response",
+    "input_data": {
+      "request_type": "ai_recommend_response",
+      "request_id": "req_rec_001",
+      "org_id": "default",
+      "incident": {
+        "id": "INC-1",
+        "type": "robbery",
+        "severity": 4,
+        "description": "armed robbery reported",
+        "location": {
+          "name": "Gate A",
+          "lat": 6.42,
+          "lng": 3.42
+        }
+      },
+      "analysis": {
+        "threat_assessment": {
+          "threat_level": "high"
+        }
+      },
+      "context": {
+        "operator_id": "operator_001",
+        "prompt_version": "v2",
+        "model": "qwen-plus",
+        "inventory": {
+          "request_id": "fallback-1784542394914",
+          "status": "success",
+          "data": {
+            "officers": {
+              "total": 0,
+              "available": 0,
+              "armed_available": 0,
+              "below_threshold": false
+            },
+            "vehicles": {
+              "total": 0,
+              "available": 0,
+              "below_threshold": false
+            },
+            "weapons": {
+              "pistols_available": 0,
+              "rifles_available": 0,
+              "tasers_available": 0,
+              "below_threshold": false
+            },
+            "ammunition": {
+              "pistol_rounds": 0,
+              "rifle_rounds": 0,
+              "below_threshold": false
+            },
+            "tactical": {
+              "body_armour_available": 0,
+              "radios_available": 0,
+              "first_aid_kits": 0,
+              "below_threshold": false
+            },
+            "fuel_reserve": {
+              "litres": 0,
+              "percentage": 0,
+              "below_threshold": true,
+              "threshold_alert_level": "WARNING"
+            },
+            "cadence": {
+              "officers": {},
+              "vehicles": {}
+            },
+            "active_alerts": 0,
+            "last_updated": "2026-07-20T10:13:14.914Z",
+            "llm_review": {
+              "approved": true,
+              "issues": [],
+              "risk_level": "medium",
+              "missing_fields": [],
+              "recommended_actions": []
+            }
+          },
+          "meta": {
+            "elapsed_ms": 0,
+            "soft_target_ms": 500,
+            "within_soft_target": true,
+            "degraded": true
+          }
+        },
+        "proximity": {
+          "incident_id": "unknown",
+          "search_radius_km": 5,
+          "total_on_shift": 0,
+          "total_candidates_found": 0,
+          "recommended_officers": [],
+          "recommended_vehicles": [],
+          "excluded_officers": [],
+          "summary": {
+            "fastest_responder": null,
+            "fastest_eta_seconds": null,
+            "officers_available_in_area": 0,
+            "officers_recommended": 0,
+            "all_requirements_met": false,
+            "warnings": [
+              "proximity service unavailable"
+            ]
+          }
+        },
+        "route_calculator": {
+          "request_id": "fallback-1784542394914",
+          "status": "success",
+          "data": {
+            "recommended_routing_type": "vehicle",
+            "reasoning": "route calculator unavailable",
+            "routes": [],
+            "infrastructure_recommendations": [],
+            "push_route_to_officers": [],
+            "mapbox_route_geojson": {},
+            "meta": {
+              "total_ms": 0,
+              "degraded": true
+            }
+          }
+        },
+        "osint_data": {}
+      }
+    },
+    "output_data": {
+      "request_id": "req_rec_001",
+      "status": "success",
+      "data": {
+        "incident_id": "INC-1",
+        "prompt_version": "v2",
+        "model": "qwen-plus",
+        "confidence": 87,
+        "recommendation": "Approve immediate response, prioritize safety, and keep approval chain active.",
+        "response_plan": {
+          "priority": "immediate",
+          "officers_needed": 4,
+          "vehicles_needed": 1,
+          "approval_required": true,
+          "suggested_channel": "command"
+        },
+        "operator_id": "operator_001",
+        "actions": [
+          "Notify supervisor",
+          "Dispatch responders",
+          "Prepare autonomous controls"
+        ],
+        "risk_level": "high"
+      },
+      "meta": {
+        "degraded": true,
+        "fallback_reason": "qwen offline",
+        "ai_operation_id": "aio_hrddzgfdmrt2gsgy",
+        "prompt_version": "v2",
+        "model": "qwen-plus",
+        "confidence": 87,
+        "recommendation": "Approve immediate response, prioritize safety, and keep approval chain active.",
+        "operator_id": "operator_001",
+        "fallback_used": true,
+        "retries": 3,
+        "duration_ms": 0,
+        "synthesized_request": {
+          "request_type": "ai_recommend_response",
+          "request_id": "req_rec_001",
+          "org_id": "default",
+          "incident": {
+            "id": "INC-1",
+            "type": "robbery",
+            "severity": 4,
+            "description": "armed robbery reported",
+            "location": {
+              "name": "Gate A",
+              "lat": 6.42,
+              "lng": 3.42
+            }
+          },
+          "analysis": {
+            "threat_assessment": {
+              "threat_level": "high"
+            }
+          },
+          "context": {
+            "operator_id": "operator_001",
+            "prompt_version": "v2",
+            "model": "qwen-plus",
+            "inventory": {
+              "request_id": "fallback-1784542394914",
+              "status": "success",
+              "data": {
+                "officers": {
+                  "total": 0,
+                  "available": 0,
+                  "armed_available": 0,
+                  "below_threshold": false
+                },
+                "vehicles": {
+                  "total": 0,
+                  "available": 0,
+                  "below_threshold": false
+                },
+                "weapons": {
+                  "pistols_available": 0,
+                  "rifles_available": 0,
+                  "tasers_available": 0,
+                  "below_threshold": false
+                },
+                "ammunition": {
+                  "pistol_rounds": 0,
+                  "rifle_rounds": 0,
+                  "below_threshold": false
+                },
+                "tactical": {
+                  "body_armour_available": 0,
+                  "radios_available": 0,
+                  "first_aid_kits": 0,
+                  "below_threshold": false
+                },
+                "fuel_reserve": {
+                  "litres": 0,
+                  "percentage": 0,
+                  "below_threshold": true,
+                  "threshold_alert_level": "WARNING"
+                },
+                "cadence": {
+                  "officers": {},
+                  "vehicles": {}
+                },
+                "active_alerts": 0,
+                "last_updated": "2026-07-20T10:13:14.914Z",
+                "llm_review": {
+                  "approved": true,
+                  "issues": [],
+                  "risk_level": "medium",
+                  "missing_fields": [],
+                  "recommended_actions": []
+                }
+              },
+              "meta": {
+                "elapsed_ms": 0,
+                "soft_target_ms": 500,
+                "within_soft_target": true,
+                "degraded": true
+              }
+            },
+            "proximity": {
+              "incident_id": "unknown",
+              "search_radius_km": 5,
+              "total_on_shift": 0,
+              "total_candidates_found": 0,
+              "recommended_officers": [],
+              "recommended_vehicles": [],
+              "excluded_officers": [],
+              "summary": {
+                "fastest_responder": null,
+                "fastest_eta_seconds": null,
+                "officers_available_in_area": 0,
+                "officers_recommended": 0,
+                "all_requirements_met": false,
+                "warnings": [
+                  "proximity service unavailable"
+                ]
+              }
+            },
+            "route_calculator": {
+              "request_id": "fallback-1784542394914",
+              "status": "success",
+              "data": {
+                "recommended_routing_type": "vehicle",
+                "reasoning": "route calculator unavailable",
+                "routes": [],
+                "infrastructure_recommendations": [],
+                "push_route_to_officers": [],
+                "mapbox_route_geojson": {},
+                "meta": {
+                  "total_ms": 0,
+                  "degraded": true
+                }
+              }
+            },
+            "osint_data": {}
+          }
+        }
+      }
+    },
+    "user_decision": "n/a",
+    "created_at": "2026-07-20T10:13:14.915Z",
+    "updated_at": "2026-07-20T10:13:14.915Z"
+  }
+]

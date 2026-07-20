@@ -23,6 +23,8 @@ npm start
 - `AUDIT_LOG_PATH`
 - `OSINT_BRAIN_URL`
 - `AI_ANALYSIS_URL`
+- `QWEN_URL`
+- `QWEN_API_URL`
 - `MAIN_AGENT_URL`
 - `AUTONOMOUS_CONTROL_URL`
 - `INVENTORY_SERVICE_URL`
@@ -42,5 +44,6 @@ npm start
 - Primary API prefix: `/api/v1`
 - Audit events are appended to `data/audit-log.jsonl`
 - Upstream service failures fall back to degraded local responses
+- `/ai/analyze-incident`, `/ai/process-radio`, and `/ai/recommend-response` proxy to Qwen when configured and fall back to heuristics when it is not
 - Graph endpoints live under `/v1/entities`, `/v1/relationships`, and `/v1/graph/query`
 - Internal inventory alerts can be posted to `/internal/inventory-alert`

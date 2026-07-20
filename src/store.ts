@@ -5,6 +5,9 @@ import { config } from './config';
 import { syncSupabaseRecord } from './external-sync';
 import {
   AuditEntry,
+  AiApprovalRecord,
+  AiLogRecord,
+  AiOperationRecord,
   AutonomousActionLog,
   BridgeRecord,
   DeviceRecord,
@@ -35,6 +38,9 @@ const infrastructure = new Map<string, InfrastructureRecord>();
 const autonomousLogs: AutonomousActionLog[] = [];
 const inventoryAlerts = new Map<string, InventoryAlert>();
 const routePlans = new Map<string, RoutePlanRecord>();
+const aiOperations = new Map<string, AiOperationRecord>();
+const aiApprovals = new Map<string, AiApprovalRecord>();
+const aiLogs = new Map<string, AiLogRecord>();
 const dataDir = path.join(process.cwd(), 'data');
 const filePaths = {
   incidents: path.join(dataDir, 'incidents.json'),
@@ -51,7 +57,10 @@ const filePaths = {
   infrastructure: path.join(dataDir, 'infrastructure.json'),
   autonomousLogs: path.join(dataDir, 'autonomous-logs.json'),
   inventoryAlerts: path.join(dataDir, 'inventory-alerts.json'),
-  routePlans: path.join(dataDir, 'route-plans.json')
+  routePlans: path.join(dataDir, 'route-plans.json'),
+  aiOperations: path.join(dataDir, 'ai-operations.json'),
+  aiApprovals: path.join(dataDir, 'ai-approvals.json'),
+  aiLogs: path.join(dataDir, 'ai-logs.json')
 };
 
 function ensureParent(filePath: string): void {
@@ -161,7 +170,10 @@ function hydrateStores(): void {
     [bridges, filePaths.bridges, 'id'],
     [infrastructure, filePaths.infrastructure, 'id'],
     [inventoryAlerts, filePaths.inventoryAlerts, 'alert_id'],
-    [routePlans, filePaths.routePlans, 'route_id']
+    [routePlans, filePaths.routePlans, 'route_id'],
+    [aiOperations, filePaths.aiOperations, 'operation_id'],
+    [aiApprovals, filePaths.aiApprovals, 'approval_id'],
+    [aiLogs, filePaths.aiLogs, 'id']
   ] as const;
 
   for (const [map, filePath, key] of hydration) {
@@ -256,15 +268,87 @@ export function getSession(request_id: string): unknown | undefined {
   return sessions.get(request_id);
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(str: any): boolean {
+  return typeof str === 'string' && UUID_REGEX.test(str);
+}
+
 export function pushAudit(entry: AuditEntry, auditLogPath: string): void {
   auditEntries.push(entry);
-  ensureParent(auditLogPath);
-  fs.appendFileSync(auditLogPath, `${JSON.stringify(entry)}\n`, 'utf8');
-  appendJsonLine(filePaths.auditLog, entry);
+  try {
+    ensureParent(auditLogPath);
+    fs.appendFileSync(auditLogPath, `${JSON.stringify(entry)}\n`, 'utf8');
+    appendJsonLine(filePaths.auditLog, entry);
+  } catch (err) {
+    console.error('Local audit file write failed:', err);
+  }
+
+  const actorIdVal = isUuid(entry.actor_id) ? entry.actor_id : (isUuid(entry.sub) ? entry.sub : '00000000-0000-0000-0000-000000000000');
+  const orgIdVal = isUuid(entry.org_id) ? entry.org_id : null;
+  const entityIdVal = isUuid(entry.ai_operation_id) ? entry.ai_operation_id : null;
+
+  const dbRecord = {
+    id: entry.id,
+    actor_id: actorIdVal,
+    actor_name: entry.client_name || entry.sub || 'System',
+    entity: entry.path.split('/').filter(Boolean)[2] || 'gateway',
+    entity_id: entityIdVal,
+    action: `${entry.method} ${entry.path.split('?')[0]}`,
+    details: entry,
+    organisation_id: orgIdVal,
+    created_at: entry.timestamp
+  };
+
+  syncSupabaseRecord('audit_log', dbRecord);
 }
 
 export function queryAudit(limit = 100): AuditEntry[] {
   return auditEntries.slice(-Math.max(1, limit));
+}
+
+export function saveAiOperation(operation: AiOperationRecord): AiOperationRecord {
+  aiOperations.set(operation.operation_id, operation);
+  persistMap(aiOperations, filePaths.aiOperations);
+  syncSupabaseRecord('ai_operations', operation);
+  return operation;
+}
+
+export function getAiOperation(operationId: string): AiOperationRecord | undefined {
+  return aiOperations.get(operationId);
+}
+
+export function listAiOperations(limit = 100): AiOperationRecord[] {
+  return [...aiOperations.values()].slice(-Math.max(1, limit));
+}
+
+export function saveAiApproval(record: AiApprovalRecord): AiApprovalRecord {
+  aiApprovals.set(record.approval_id, record);
+  persistMap(aiApprovals, filePaths.aiApprovals);
+  syncSupabaseRecord('ai_approvals', record);
+  return record;
+}
+
+export function getAiApproval(approvalId: string): AiApprovalRecord | undefined {
+  return aiApprovals.get(approvalId);
+}
+
+export function listAiApprovals(limit = 100): AiApprovalRecord[] {
+  return [...aiApprovals.values()].slice(-Math.max(1, limit));
+}
+
+export function saveAiLog(record: AiLogRecord): AiLogRecord {
+  aiLogs.set(record.id, record);
+  persistMap(aiLogs, filePaths.aiLogs);
+  syncSupabaseRecord('ai_logs', record);
+  return record;
+}
+
+export function listAiLogs(limit = 100): AiLogRecord[] {
+  return [...aiLogs.values()].slice(-Math.max(1, limit));
+}
+
+export function getAiLog(id: string): AiLogRecord | undefined {
+  return aiLogs.get(id);
 }
 
 export function saveEntity(entity: GraphEntity): GraphEntity {

@@ -49,6 +49,11 @@ export const config = {
   groqApiKey: firstEnv(['GROQ_API_KEY']),
   groqModel: firstEnv(['GROQ_MODEL'], 'llama-3.3-70b-versatile'),
   groqBaseUrl: firstEnv(['GROQ_BASE_URL']),
+  qwenApiKey: firstEnv(['QWEN_API_KEY', 'QWEN_INTERNAL_KEY', 'INTERNAL_API_KEY']),
+  qwenModel: firstEnv(['QWEN_MODEL'], 'qwen-plus'),
+  qwenPromptVersion: firstEnv(['QWEN_PROMPT_VERSION'], 'v1'),
+  qwenTimeoutMs: Number(firstEnv(['QWEN_TIMEOUT_MS'], '8000')),
+  qwenRetryCount: Number(firstEnv(['QWEN_RETRY_COUNT'], '3')),
   relationshipApiUrl: firstEnv(['RELATIONSHIP_API_URL']),
   relationshipApiKey: firstEnv(['RELATIONSHIP_API_KEY']),
   relationshipApiTimeoutMs: Number(firstEnv(['RELATIONSHIP_API_TIMEOUT_MS'], '8000')),
@@ -95,6 +100,16 @@ export const config = {
       },
       authMode: 'api-key',
       fallbackService: 'aiAnalysis'
+    } satisfies ServiceConfig,
+    qwen: {
+      name: 'qwen',
+      baseUrl: firstEnv(['QWEN_URL', 'QWEN_API_URL']),
+      healthPath: '/health',
+      defaultHeaders: {
+        'X-Internal-Key': firstEnv(['QWEN_API_KEY', 'QWEN_INTERNAL_KEY', 'INTERNAL_API_KEY'])
+      },
+      authMode: 'api-key',
+      fallbackService: 'qwen'
     } satisfies ServiceConfig,
     mainAgent: {
       name: 'mainAgent',
@@ -145,6 +160,16 @@ export const config = {
       },
       authMode: 'bearer',
       fallbackService: 'routeCalculator'
+    } satisfies ServiceConfig,
+    cctv: {
+      name: 'cctv',
+      baseUrl: firstEnv(['CCTV_PERCEPTION_URL', 'CCTV_URL'], 'http://localhost:8004'),
+      healthPath: '/health',
+      defaultHeaders: {
+        'X-Internal-Key': firstEnv(['CCTV_INTERNAL_KEY', 'INTERNAL_API_KEY'])
+      },
+      authMode: 'api-key',
+      fallbackService: 'cctv'
     } satisfies ServiceConfig
   }
 };

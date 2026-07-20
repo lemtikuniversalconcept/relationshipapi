@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { callService } from './clients';
+import { config } from './config';
 import { IncidentRecord, RequestPrincipal } from './types';
 import {
   autonomousActionSchema,
@@ -7,9 +8,18 @@ import {
   internalAutonomousExecuteSchema,
   masterAiProcessSchema,
   masterAiSynthesiseSchema,
-  masterAiTriageSchema
+  masterAiTriageSchema,
+  qwenApprovalSchema,
+  qwenAnalyzeIncidentResponseSchema,
+  qwenAnalyzeIncidentSchema,
+  qwenAnalyzeImageResponseSchema,
+  qwenAnalyzeImageSchema,
+  qwenProcessRadioResponseSchema,
+  qwenProcessRadioSchema,
+  qwenRecommendResponseResponseSchema,
+  qwenRecommendResponseSchema
 } from './schemas';
-import { saveSession, saveIncident, updateIncident, saveOverride } from './store';
+import { saveAiApproval, saveAiOperation, saveSession, saveIncident, updateIncident, saveOverride, getAiOperation } from './store';
 
 function randomId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
@@ -181,6 +191,478 @@ function buildAgentPayload(
       autonomous_actions_require_approval: true,
       max_response_time_seconds: 30,
       approval_officer_id: approvalOfficerId || orgId
+    }
+  };
+}
+
+function normalizeAiOperatorId(principal: RequestPrincipal, payload: Record<string, unknown>): string {
+  const context = (payload.context as Record<string, unknown>) || {};
+  return String(context.operator_id || principal.actor_id || principal.sub || principal.role || 'unknown');
+}
+
+function buildAiAudit(operation: {
+  operation_id: string;
+  endpoint: string;
+  prompt_version: string;
+  model: string;
+  confidence?: number;
+  recommendation?: string;
+  operator_id?: string;
+  fallback_used: boolean;
+}): Record<string, unknown> {
+  return {
+    ai_endpoint: operation.endpoint,
+    ai_operation_id: operation.operation_id,
+    ai_prompt_version: operation.prompt_version,
+    ai_model: operation.model,
+    ai_confidence: operation.confidence,
+    ai_recommendation: operation.recommendation,
+    ai_operator_id: operation.operator_id,
+    ai_fallback_used: operation.fallback_used
+  };
+}
+
+function normalizeAiText(value: unknown): string {
+  return String(value || '').trim();
+}
+
+function extractAiRecommendation(data: Record<string, unknown>): string {
+  return normalizeAiText(
+    data.recommendation ||
+      data.summary ||
+      data.reasoning ||
+      data.risk_level ||
+      'Local heuristic recommendation'
+  );
+}
+
+function extractAiConfidence(data: Record<string, unknown>): number {
+  const raw = Number(data.confidence);
+  if (Number.isFinite(raw)) return Math.max(0, Math.min(100, raw));
+  return 60;
+}
+
+function localQwenAnalyzeIncident(payload: Record<string, unknown>, principal: RequestPrincipal): Record<string, unknown> {
+  const incident = (payload.incident as Record<string, unknown>) || {};
+  const description = String(incident.description || '');
+  const severity = Number(incident.severity || 3);
+  const confidence = Math.max(58, Math.min(95, 70 + (severity >= 4 ? 10 : 0) + (description ? 6 : -10)));
+  const recommendation = severity >= 4
+    ? 'Escalate to immediate response and notify a supervisor.'
+    : 'Review incident context and continue with standard response.';
+  return {
+    request_id: String(payload.request_id || randomId('req')),
+    status: 'success',
+    data: {
+      incident_id: String(incident.id || 'unknown'),
+      prompt_version: String((payload.context as Record<string, unknown>)?.prompt_version || config.qwenPromptVersion),
+      model: String((payload.context as Record<string, unknown>)?.model || config.qwenModel),
+      confidence,
+      recommendation,
+      reasoning: 'Generated locally because Qwen was unavailable or returned an invalid contract.',
+      operator_id: normalizeAiOperatorId(principal, payload),
+      analysis: {
+        threat_level: severity >= 4 ? 'high' : severity >= 2 ? 'medium' : 'low',
+        incident_type: String(incident.type || 'unknown'),
+        escalation_required: severity >= 4,
+        armed_threat: /(armed|weapon|gun|knife|stab|shoot)/i.test(description)
+      },
+      risk_level: severity >= 4 ? 'high' : severity >= 2 ? 'medium' : 'low',
+      suggested_actions: severity >= 4
+        ? ['Dispatch responders immediately', 'Notify supervisor', 'Prepare autonomous controls if approved']
+        : ['Monitor incident', 'Verify context', 'Continue standard workflow']
+    },
+    meta: {
+      degraded: true,
+      fallback_reason: 'qwen offline'
+    }
+  };
+}
+
+function localQwenAnalyzeImage(payload: Record<string, unknown>, principal: RequestPrincipal): Record<string, unknown> {
+  const image = (payload.image as Record<string, unknown>) || {};
+  const caption = normalizeAiText(image.caption);
+  const mimeType = String(image.mime_type || '');
+  const threaty = /(weapon|gun|knife|blood|fire|smoke|crowd|suspicious|vehicle)/i.test(`${caption} ${String(image.filename || '')}`);
+  const confidence = Math.max(56, Math.min(96, 66 + (caption ? 10 : -8) + (threaty ? 12 : 0) + (mimeType.startsWith('image/') ? 4 : -4)));
+  return {
+    request_id: String(payload.request_id || randomId('req')),
+    status: 'success',
+    data: {
+      image_id: String(image.filename || image.url || randomId('img')),
+      prompt_version: String((payload.context as Record<string, unknown>)?.prompt_version || config.qwenPromptVersion),
+      model: String((payload.context as Record<string, unknown>)?.model || config.qwenModel),
+      confidence,
+      recommendation: threaty
+        ? 'Review the image immediately and escalate if a threat is visible.'
+        : 'Image appears routine; verify context and continue monitoring.',
+      findings: threaty ? ['Potential threat indicators detected', 'Manual review recommended'] : ['No obvious threat indicators detected'],
+      labels: threaty ? ['threat', 'needs_review'] : ['routine'],
+      summary: caption || 'Fallback image analysis generated locally.',
+      operator_id: normalizeAiOperatorId(principal, payload),
+      risk_level: confidence >= 80 ? 'high' : confidence >= 65 ? 'medium' : 'low'
+    },
+    meta: {
+      degraded: true,
+      fallback_reason: 'qwen offline'
+    }
+  };
+}
+
+function localQwenProcessRadio(payload: Record<string, unknown>, principal: RequestPrincipal): Record<string, unknown> {
+  const radio = (payload.radio as Record<string, unknown>) || {};
+  const transcript = normalizeAiText(radio.transcript || radio.message);
+  const lower = transcript.toLowerCase();
+  const urgent = /(help|shots|gun|weapon|stab|urgent|emergency|attack|assault)/.test(lower);
+  const recommendation = urgent
+    ? 'Treat this transmission as urgent and escalate to dispatch.'
+    : 'Log the transmission and continue monitoring.';
+  const confidence = Math.max(55, Math.min(94, 68 + (transcript ? 8 : -15) + (urgent ? 10 : 0)));
+  return {
+    request_id: String(payload.request_id || randomId('req')),
+    status: 'success',
+    data: {
+      transcript,
+      prompt_version: String((payload.context as Record<string, unknown>)?.prompt_version || config.qwenPromptVersion),
+      model: String((payload.context as Record<string, unknown>)?.model || config.qwenModel),
+      confidence,
+      recommendation,
+      classification: {
+        urgency: urgent ? 'immediate' : 'standard',
+        channel_id: String(radio.channel_id || 'unknown'),
+        source: String(radio.source || 'radio'),
+        contains_distress: urgent,
+        likely_incident_type: urgent ? 'incident_alert' : 'routine_update'
+      },
+      summary: transcript
+        ? `Processed radio transmission from ${String(radio.source || 'unknown')}.`
+        : 'No transcript provided; used local fallback classification.',
+      operator_id: normalizeAiOperatorId(principal, payload),
+      action_items: urgent
+        ? ['Alert dispatcher', 'Escalate to supervisor', 'Track incident context']
+        : ['Archive transmission', 'Monitor for follow-up']
+    },
+    meta: {
+      degraded: true,
+      fallback_reason: 'qwen offline'
+    }
+  };
+}
+
+function localQwenRecommendResponse(payload: Record<string, unknown>, principal: RequestPrincipal): Record<string, unknown> {
+  const incident = (payload.incident as Record<string, unknown>) || {};
+  const analysis = (payload.analysis as Record<string, unknown>) || {};
+  const severity = Number(incident.severity || analysis?.threat_assessment?.severity || 3);
+  const recommendation = severity >= 4
+    ? 'Approve immediate response, prioritize safety, and keep approval chain active.'
+    : 'Proceed with monitored response and confirm conditions before escalation.';
+  const confidence = Math.max(60, Math.min(96, 75 + (severity >= 4 ? 12 : 0)));
+  return {
+    request_id: String(payload.request_id || randomId('req')),
+    status: 'success',
+    data: {
+      incident_id: String(incident.id || 'unknown'),
+      prompt_version: String((payload.context as Record<string, unknown>)?.prompt_version || config.qwenPromptVersion),
+      model: String((payload.context as Record<string, unknown>)?.model || config.qwenModel),
+      confidence,
+      recommendation,
+      response_plan: {
+        priority: severity >= 4 ? 'immediate' : 'standard',
+        officers_needed: severity >= 4 ? 4 : 2,
+        vehicles_needed: severity >= 4 ? 1 : 0,
+        approval_required: severity >= 4,
+        suggested_channel: severity >= 4 ? 'command' : 'operations'
+      },
+      operator_id: normalizeAiOperatorId(principal, payload),
+      actions: severity >= 4
+        ? ['Notify supervisor', 'Dispatch responders', 'Prepare autonomous controls']
+        : ['Monitor incident', 'Maintain situational awareness'],
+      risk_level: severity >= 4 ? 'high' : severity >= 2 ? 'medium' : 'low'
+    },
+    meta: {
+      degraded: true,
+      fallback_reason: 'qwen offline'
+    }
+  };
+}
+
+async function buildAiRecommendationContext(principal: RequestPrincipal, payload: Record<string, unknown>, orgId: string): Promise<Record<string, unknown>> {
+  const incident = (payload.incident as Record<string, unknown>) || {};
+  const analysis = (payload.analysis as Record<string, unknown>) || {};
+  const context = (payload.context as Record<string, unknown>) || {};
+  const requestId = String(payload.request_id || randomId('req'));
+
+  const inventoryCall = await callService({
+    service: 'inventory',
+    path: '/query',
+    body: {
+      request_type: 'inventory_summary',
+      request_id: randomId('req'),
+      org_id: orgId
+    }
+  });
+
+  const proximityPayload = buildProximityPayload(orgId, incident);
+  const proximityCall = await callService({
+    service: 'proximity',
+    path: '/find',
+    body: proximityPayload
+  });
+
+  const proximityData = (proximityCall.data as Record<string, unknown>)?.data || proximityCall.data || {};
+  const recommendedOfficers = Array.isArray((proximityData as Record<string, unknown>)?.recommended_officers)
+    ? (proximityData as Record<string, unknown>).recommended_officers as unknown[]
+    : [];
+  const recommendedVehicles = Array.isArray((proximityData as Record<string, unknown>)?.recommended_vehicles)
+    ? (proximityData as Record<string, unknown>).recommended_vehicles as unknown[]
+    : [];
+
+  const routeCall = await callService({
+    service: 'routeCalculator',
+    path: '/route/calculate',
+    body: buildRoutePayload(
+      orgId,
+      incident,
+      {
+        officers: recommendedOfficers.map((entry) => String((entry as Record<string, unknown>).officer_id || (entry as Record<string, unknown>).id || 'unknown')).filter(Boolean),
+        vehicles: recommendedVehicles.map((entry) => String((entry as Record<string, unknown>).vehicle_id || (entry as Record<string, unknown>).id || 'unknown')).filter(Boolean)
+      }
+    )
+  });
+
+  return {
+    request_type: 'ai_recommend_response',
+    request_id: requestId,
+    org_id: orgId,
+    incident,
+    analysis,
+    context: {
+      ...context,
+      operator_id: String(context.operator_id || principal.actor_id || principal.sub || principal.role || 'unknown'),
+      prompt_version: String(context.prompt_version || config.qwenPromptVersion),
+      model: String(context.model || config.qwenModel),
+      inventory: (inventoryCall.data as Record<string, unknown>) || inventoryCall,
+      proximity: proximityData,
+      route_calculator: (routeCall.data as Record<string, unknown>) || routeCall,
+      osint_data: context.osint_data || {}
+    }
+  };
+}
+
+async function runQwenContractedOperation<TRequest extends Record<string, unknown>, TResponse extends Record<string, unknown>>(
+  principal: RequestPrincipal,
+  endpoint: string,
+  operationType: string,
+  payload: TRequest,
+  requestSchema: { safeParse: (value: unknown) => { success: boolean; data?: TRequest; error?: unknown } },
+  responseSchema: { safeParse: (value: unknown) => { success: boolean; data?: TResponse; error?: unknown } },
+  fallbackBuilder: (payload: TRequest, principal: RequestPrincipal) => TResponse
+): Promise<Record<string, unknown>> {
+  const parsedRequest = requestSchema.safeParse(payload);
+  if (!parsedRequest.success) {
+    return {
+      request_id: String((payload as Record<string, unknown>).request_id || randomId('req')),
+      status: 'failed',
+      error: 'Invalid AI request payload',
+      data: { validation_error: true }
+    };
+  }
+
+  const request = parsedRequest.data;
+  const requestId = String(request.request_id || randomId('req'));
+  const orgId = String(request.org_id || principal.org_id || config.orgDefault);
+  const operationId = randomId('aio');
+  const promptVersion = String((request.context as Record<string, unknown>)?.prompt_version || config.qwenPromptVersion);
+  const model = String((request.context as Record<string, unknown>)?.model || config.qwenModel);
+  const operatorId = normalizeAiOperatorId(principal, request);
+  const started = Date.now();
+  const timeoutMs = config.qwenTimeoutMs || 8000;
+  const retries = Math.max(0, Number.isFinite(config.qwenRetryCount) ? config.qwenRetryCount : 3);
+
+  const upstream = await callService({
+    service: 'qwen',
+    path: endpoint,
+    body: request,
+    timeoutMs,
+    retries,
+    allowFallback: true
+  });
+
+  let output: TResponse;
+  let fallbackUsed = upstream.fallback || !upstream.ok;
+  let errorText: string | undefined = upstream.error;
+
+  if (!fallbackUsed) {
+    const validated = responseSchema.safeParse(upstream.data);
+    if (validated.success && validated.data) {
+      output = validated.data;
+    } else {
+      fallbackUsed = true;
+      errorText = 'Qwen response contract validation failed';
+      output = fallbackBuilder(request, principal);
+    }
+  } else {
+    output = fallbackBuilder(request, principal);
+  }
+
+  const confidence = extractAiConfidence((output as Record<string, unknown>).data || {});
+  const recommendation = extractAiRecommendation((output as Record<string, unknown>).data || {});
+  const durationMs = Date.now() - started;
+
+  saveAiOperation({
+    operation_id: operationId,
+    request_id: requestId,
+    org_id: orgId,
+    endpoint,
+    operation_type: operationType,
+    prompt_version: promptVersion,
+    model,
+    operator_id: operatorId,
+    confidence,
+    recommendation,
+    status: fallbackUsed ? 'fallback' : 'success',
+    fallback_used: fallbackUsed,
+    retries,
+    request_payload: request,
+    response_payload: output,
+    error: errorText,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    duration_ms: durationMs
+  });
+
+  saveSession(requestId, {
+    endpoint,
+    operation_type: operationType,
+    prompt_version: promptVersion,
+    model,
+    operator_id: operatorId,
+    confidence,
+    recommendation,
+    fallback_used: fallbackUsed,
+    request,
+    response: output
+  });
+
+  return {
+    ...output,
+    meta: {
+      ...((output as Record<string, unknown>).meta || {}),
+      ai_operation_id: operationId,
+      prompt_version: promptVersion,
+      model,
+      confidence,
+      recommendation,
+      operator_id: operatorId,
+      fallback_used: fallbackUsed,
+      retries,
+      duration_ms: durationMs,
+      error: errorText,
+      synthesized_request: operationType === 'recommend_response' ? request : undefined
+    }
+  };
+}
+
+export async function processQwenAnalyzeIncident(principal: RequestPrincipal, payload: unknown, orgId: string): Promise<Record<string, unknown>> {
+  const parsed = qwenAnalyzeIncidentSchema.parse(payload || {});
+  return runQwenContractedOperation(
+    principal,
+    '/ai/analyze-incident',
+    'analyze_incident',
+    { ...parsed, org_id: orgId },
+    qwenAnalyzeIncidentSchema,
+    qwenAnalyzeIncidentResponseSchema,
+    (request, currentPrincipal) => localQwenAnalyzeIncident(request, currentPrincipal) as any
+  );
+}
+
+export async function processQwenAnalyzeImage(principal: RequestPrincipal, payload: unknown, orgId: string): Promise<Record<string, unknown>> {
+  const parsed = qwenAnalyzeImageSchema.parse(payload || {});
+  return runQwenContractedOperation(
+    principal,
+    '/ai/analyze-image',
+    'analyze_image',
+    { ...parsed, org_id: orgId },
+    qwenAnalyzeImageSchema,
+    qwenAnalyzeImageResponseSchema,
+    (request, currentPrincipal) => localQwenAnalyzeImage(request, currentPrincipal) as any
+  );
+}
+
+export async function processQwenRadio(principal: RequestPrincipal, payload: unknown, orgId: string): Promise<Record<string, unknown>> {
+  const parsed = qwenProcessRadioSchema.parse(payload || {});
+  return runQwenContractedOperation(
+    principal,
+    '/ai/process-radio',
+    'process_radio',
+    { ...parsed, org_id: orgId },
+    qwenProcessRadioSchema,
+    qwenProcessRadioResponseSchema,
+    (request, currentPrincipal) => localQwenProcessRadio(request, currentPrincipal) as any
+  );
+}
+
+export async function processQwenRecommendResponse(principal: RequestPrincipal, payload: unknown, orgId: string): Promise<Record<string, unknown>> {
+  const parsed = qwenRecommendResponseSchema.parse(payload || {});
+  const synthesized = await buildAiRecommendationContext(principal, parsed, orgId);
+  return runQwenContractedOperation(
+    principal,
+    '/ai/recommend-response',
+    'recommend_response',
+    { ...synthesized, org_id: orgId },
+    qwenRecommendResponseSchema,
+    qwenRecommendResponseResponseSchema,
+    (request, currentPrincipal) => localQwenRecommendResponse(request, currentPrincipal) as any
+  );
+}
+
+export async function processQwenApproval(principal: RequestPrincipal, payload: unknown, orgId: string): Promise<Record<string, unknown>> {
+  const parsed = qwenApprovalSchema.parse(payload || {});
+  const approvedBy = parsed.approved_by || principal.sub;
+  const approvalLevel = parsed.approval_level || principal.role;
+  const approvedAt = new Date().toISOString();
+  const approvalId = randomId('aiappr');
+  const operation = getAiOperation(parsed.operation_id);
+  const record = saveAiApproval({
+    approval_id: approvalId,
+    request_id: parsed.request_id,
+    org_id: orgId,
+    operation_id: parsed.operation_id,
+    approved_by: approvedBy,
+    approval_level: approvalLevel,
+    decision: parsed.decision,
+    notes: parsed.notes,
+    approved_payload: parsed.approved_payload,
+    created_at: approvedAt,
+    updated_at: approvedAt
+  });
+  saveSession(parsed.request_id, {
+    approval_id: approvalId,
+    operation_id: parsed.operation_id,
+    decision: parsed.decision,
+    approved_by: approvedBy,
+    approval_level: approvalLevel,
+    approved_at: approvedAt,
+    operation: operation || null,
+    approved_payload: parsed.approved_payload || null
+  });
+  return {
+    request_id: parsed.request_id,
+    status: 'success',
+    data: {
+      approval_id: record.approval_id,
+      operation_id: record.operation_id,
+      request_id: record.request_id,
+      org_id: record.org_id,
+      decision: record.decision,
+      approved_by: record.approved_by,
+      approval_level: record.approval_level,
+      approved_at: record.created_at,
+      notes: record.notes,
+      approved_payload: record.approved_payload
+    },
+    meta: {
+      operation_found: Boolean(operation)
     }
   };
 }
