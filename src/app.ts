@@ -292,7 +292,7 @@ function principalFromRequest(request: any): RequestPrincipal {
 
 function assertOrgAccess(principal: RequestPrincipal, candidate?: string): string {
   const org = candidate || principal.org_id || config.orgDefault;
-  if (principal.org_id && candidate && candidate !== principal.org_id) {
+  if (principal.role !== 'service' && principal.org_id && candidate && candidate !== principal.org_id) {
     throw new Error('Forbidden organization scope');
   }
   return org;
@@ -315,7 +315,7 @@ function requireRole(principal: RequestPrincipal, checker: (role?: string) => bo
 }
 
 function isAiGatewayRole(role?: string): boolean {
-  return role === 'operator' || role === 'admin';
+  return role === 'operator' || role === 'admin' || role === 'service';
 }
 
 function matchesAiLogFilter(log: Record<string, unknown>, query: Record<string, unknown>, org: string): boolean {
@@ -1721,6 +1721,20 @@ function validateBodySchema<T>(schema: { safeParse: (value: unknown) => { succes
   };
 }
 
+function validatePlainObjectBody(label = 'request') {
+  return async (request: any, reply: any) => {
+    const body = request.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return reply.code(400).send({
+        status: 'error',
+        error: `Invalid ${label} payload`,
+        details: { formErrors: ['Expected JSON object'] }
+      });
+    }
+    request.validatedBody = body as Record<string, unknown>;
+  };
+}
+
 function setAiLog(request: any, aiLog: {
   org_id?: string;
   request_id: string;
@@ -1756,6 +1770,37 @@ async function proxyCctvRequest(
     status: result.ok ? 'success' : 'failed',
     data: result.data,
     meta: { degraded: result.fallback, service: 'cctv' }
+  };
+}
+
+async function proxyMainAgentAiRequest(
+  request: any,
+  servicePath: string,
+  method: 'POST',
+  body: Record<string, unknown>,
+  principal: RequestPrincipal,
+  org: string
+): Promise<Record<string, unknown>> {
+  const result = await callService({
+    service: 'mainAgent',
+    path: servicePath,
+    method,
+    body
+  });
+  (request as any).serviceCalls = ['mainAgent'];
+  (request as any).aiAudit = {
+    ai_endpoint: servicePath,
+    ai_prompt_version: String(body?.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>).prompt_version || 'v1' : 'v1'),
+    ai_model: String(body?.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>).model || config.groqModel : config.groqModel),
+    ai_confidence: Number((result.data as Record<string, unknown>)?.confidence || (result.data as Record<string, unknown>)?.data?.confidence || 0) || undefined,
+    ai_recommendation: String((result.data as Record<string, unknown>)?.recommendation || (result.data as Record<string, unknown>)?.summary_for_commander || (result.data as Record<string, unknown>)?.data?.recommendation || 'n/a'),
+    ai_operator_id: String(principal.actor_id || principal.sub),
+    ai_fallback_used: Boolean(result.fallback)
+  };
+  return {
+    status: result.ok ? 'success' : 'failed',
+    data: result.data,
+    meta: { degraded: result.fallback, service: 'mainAgent', org_id: org }
   };
 }
 
@@ -3194,6 +3239,50 @@ app.get(['/ai/health', '/api/v1/ai/health'], async (request) => {
     prompt_version: config.qwenPromptVersion,
     upstream
   };
+});
+
+app.post(['/ai/parse-report', '/api/v1/ai/parse-report'], {
+  preValidation: validatePlainObjectBody('ai parse report')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:write');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  return proxyMainAgentAiRequest(request, '/ai/parse-report', 'POST', { ...body, org_id: org }, principal, org);
+});
+
+app.post(['/ai/correlate-events', '/api/v1/ai/correlate-events'], {
+  preValidation: validatePlainObjectBody('ai correlate events')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:write');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  return proxyMainAgentAiRequest(request, '/ai/correlate-events', 'POST', { ...body, org_id: org }, principal, org);
+});
+
+app.post(['/ai/device-recommendations', '/api/v1/ai/device-recommendations'], {
+  preValidation: validatePlainObjectBody('ai device recommendations')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:write');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  return proxyMainAgentAiRequest(request, '/ai/device-recommendations', 'POST', { ...body, org_id: org }, principal, org);
+});
+
+app.post(['/ai/query', '/api/v1/ai/query'], {
+  preValidation: validatePlainObjectBody('ai query')
+}, async (request) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'ai:read');
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
+  const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
+  return proxyMainAgentAiRequest(request, '/ai/query', 'POST', { ...body, org_id: org }, principal, org);
 });
 
 app.post(['/ai/analyze-incident', '/api/v1/ai/analyze-incident'], {
