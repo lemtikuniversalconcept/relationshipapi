@@ -689,7 +689,7 @@ export const cctvTelemetryIngestSchema = z.object({
 export const cctvFramesIngestSchema = z.object({
   request_id: z.string().optional(),
   org_id: z.string(),
-  camera_id: z.string(),
+  camera_id: z.string().optional(),
   zone: z.string().optional(),
   event_type: z.string().optional(),
   event_confidence: z.number().optional(),
@@ -734,4 +734,3 @@ export const aiGenerateSummarySchema = z.object({
   range_label: z.string().optional(),
   commentary: z.string().optional()
 }).passthrough();
-
