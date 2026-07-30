@@ -972,12 +972,18 @@ async function runIncidentOrchestration(
       proximity,
       routeCalculator
     });
-    const analysis = await callService({ service: 'aiAnalysis', path: '/ai/analyze-incident', body: analysisRequest });
+    const analysis = await callService({
+      service: 'aiAnalysis',
+      path: '/ai/analyze-incident',
+      body: analysisRequest,
+      timeoutMs: 12000
+    });
 
     const agent = await callService({
       service: 'mainAgent',
       path: '/process',
-      body: buildAgentPayload(incident, orgId, ['osint_brain', 'ai_analysis', 'autonomous_control'], principal.sub)
+      body: buildAgentPayload(incident, orgId, ['osint_brain', 'ai_analysis', 'autonomous_control'], principal.sub),
+      timeoutMs: 12000
     });
 
     const warnings = [
