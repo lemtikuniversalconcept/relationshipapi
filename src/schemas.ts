@@ -654,7 +654,11 @@ export const inventoryAlertSchema = z.object({
   current_value: z.any(),
   threshold_value: z.any(),
   message: z.string(),
-  affected_resources: z.array(z.string()).optional().default([]),
+  affected_resources: z
+    .array(z.string().nullable())
+    .optional()
+    .default([])
+    .transform((arr) => arr.filter((value): value is string => typeof value === 'string')),
   recommended_action: z.string().optional(),
   repeat_alert: z.boolean().optional(),
   next_alert_at: z.string().optional(),
