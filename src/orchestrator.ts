@@ -944,7 +944,12 @@ async function runIncidentOrchestration(
     const [osint, inventory, proximity] = await Promise.all([
       callService({ service: 'osint', path: '/brain/query', body: buildOsintPayload(incident) }),
       callService({ service: 'inventory', path: '/query', body: buildInventoryPayload(orgId, incident) }),
-      callService({ service: 'proximity', path: '/find', body: buildProximityPayload(orgId, incident) })
+      callService({
+        service: 'proximity',
+        path: '/find',
+        body: buildProximityPayload(orgId, incident),
+        timeoutMs: 12000
+      })
     ]);
 
     const responders = {
