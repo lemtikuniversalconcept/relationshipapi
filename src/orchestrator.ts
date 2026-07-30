@@ -54,25 +54,16 @@ function severityToThreatLevel(severity: number | undefined): string {
 function buildOsintPayload(incident: Record<string, unknown>, queryOverrides: Record<string, unknown> = {}) {
   const location = (incident.location as Record<string, unknown>) || {};
   return {
-    request_type: 'intelligence_query',
-    request_id: randomId('req'),
-    query: {
-      area: String(location.name || location.description || 'unknown'),
-      radius_km: 5,
-      days_back: 30,
-      categories: ['Physical', 'Cyber', 'Political', 'Macro'],
-      severity_min: Math.max(1, Number(incident.severity || 1)),
-      limit: 50,
-      include_heatmap: true,
-      incident_context: {
-        type: String(incident.type || 'unknown'),
-        keywords: String(incident.description || '')
-          .split(/[\s,]+/)
-          .filter(Boolean)
-          .slice(0, 10)
-      },
-      ...queryOverrides
-    }
+    org_id: String(incident.org_id || 'default'),
+    question: String(incident.description || incident.title || 'Intruder alert'),
+    location: String(location.name || location.description || ''),
+    lookback_days: 180,
+    recent_limit: 10,
+    custom_keywords: String(incident.description || '')
+      .split(/[\s,]+/)
+      .filter(Boolean)
+      .slice(0, 10),
+    ...queryOverrides
   };
 }
 
