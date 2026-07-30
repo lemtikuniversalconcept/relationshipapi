@@ -19,7 +19,7 @@ import {
   qwenRecommendResponseResponseSchema,
   qwenRecommendResponseSchema
 } from './schemas';
-import { saveAiApproval, saveAiOperation, saveSession, saveIncident, updateIncident, saveOverride, getAiOperation } from './store';
+import { saveAiApproval, saveAiOperation, saveSession, saveIncident, updateIncident, saveOverride, saveGraphEvent, getAiOperation } from './store';
 
 function randomId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
@@ -943,79 +943,156 @@ export async function fetchMasterAiSession(requestId: string): Promise<Record<st
   return undefined;
 }
 
-export async function orchestrateIncidentCreate(principal: RequestPrincipal, payload: unknown, orgId: string): Promise<Record<string, unknown>> {
-  const incident = normalizeIncident(payload, principal, orgId);
+async function runIncidentOrchestration(
+  incident: Record<string, unknown>,
+  principal: RequestPrincipal,
+  orgId: string,
+  recordId: string
+): Promise<void> {
+  try {
+    const [osint, inventory, proximity] = await Promise.all([
+      callService({ service: 'osint', path: '/brain/query', body: buildOsintPayload(incident) }),
+      callService({ service: 'inventory', path: '/query', body: buildInventoryPayload(orgId, incident) }),
+      callService({ service: 'proximity', path: '/find', body: buildProximityPayload(orgId, incident) })
+    ]);
 
-  const [osint, inventory, proximity] = await Promise.all([
-    callService({ service: 'osint', path: '/brain/query', body: buildOsintPayload(incident) }),
-    callService({ service: 'inventory', path: '/query', body: buildInventoryPayload(orgId, incident) }),
-    callService({ service: 'proximity', path: '/find', body: buildProximityPayload(orgId, incident) })
-  ]);
+    const responders = {
+      officers:
+        ((proximity.data as any)?.data?.recommended_officers || [])
+          .slice(0, 4)
+          .map((item: any) => item.officer_id)
+          .filter(Boolean),
+      vehicles:
+        ((inventory.data as any)?.data?.vehicles?.items || [])
+          .slice(0, 2)
+          .map((item: any) => item.vehicle_id)
+          .filter(Boolean)
+    };
 
-  const responders = {
-    officers:
-      ((proximity.data as any)?.data?.recommended_officers || [])
-        .slice(0, 4)
-        .map((item: any) => item.officer_id)
-        .filter(Boolean),
-    vehicles:
-      ((inventory.data as any)?.data?.vehicles?.items || [])
-        .slice(0, 2)
-        .map((item: any) => item.vehicle_id)
-        .filter(Boolean)
-  };
+    const routeCalculator = await callService({
+      service: 'routeCalculator',
+      path: '/route/calculate',
+      body: buildRoutePayload(orgId, incident, responders)
+    });
 
-  const routeCalculator = await callService({
-    service: 'routeCalculator',
-    path: '/route/calculate',
-    body: buildRoutePayload(orgId, incident, responders)
-  });
+    const analysisRequest = buildAnalysisPayload(incident, {
+      osint,
+      inventory,
+      proximity,
+      routeCalculator
+    });
+    const analysis = await callService({ service: 'aiAnalysis', path: '/analyze', body: analysisRequest });
 
-  const analysisRequest = buildAnalysisPayload(incident, {
-    osint,
-    inventory,
-    proximity,
-    routeCalculator
-  });
-  const analysis = await callService({ service: 'aiAnalysis', path: '/analyze', body: analysisRequest });
+    const agent = await callService({
+      service: 'mainAgent',
+      path: '/process',
+      body: buildAgentPayload(incident, orgId, ['osint_brain', 'ai_analysis', 'autonomous_control'], principal.sub)
+    });
 
-  const agent = await callService({
-    service: 'mainAgent',
-    path: '/process',
-    body: buildAgentPayload(incident, orgId, ['osint_brain', 'ai_analysis', 'autonomous_control'], principal.sub)
-  });
-
-  const record: IncidentRecord = {
-    id: String(incident.id || fallbackIncidentId(incident)),
-    org_id: orgId,
-    status: String(incident.status || 'new'),
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    incident,
-    services: { osint, inventory, proximity, routeCalculator, analysis, agent },
-    analysis: (analysis.data as any)?.analysis || (fallbackAnalysis(incident).analysis as Record<string, unknown>),
-    dispatch_plan: (agent.data as any)?.agent_output?.dispatch_plan || (fallbackAgent(incident).agent_output as any).dispatch_plan,
-    agent_output: (agent.data as any)?.agent_output || (fallbackAgent(incident).agent_output as Record<string, unknown>),
-    warnings: [
+    const warnings = [
       ...(osint.fallback ? ['OSINT fallback used'] : []),
       ...(inventory.fallback ? ['Inventory fallback used'] : []),
       ...(proximity.fallback ? ['Proximity fallback used'] : []),
       ...(routeCalculator.fallback ? ['Route calculator fallback used'] : []),
       ...(analysis.fallback ? ['AI analysis fallback used'] : []),
       ...(agent.fallback ? ['Main agent fallback used'] : [])
-    ]
+    ];
+    const updatedAt = new Date().toISOString();
+    const updated = updateIncident(recordId, {
+      status: warnings.length > 0 ? 'degraded' : 'processed',
+      updated_at: updatedAt,
+      services: { osint, inventory, proximity, routeCalculator, analysis, agent },
+      analysis: (analysis.data as any)?.analysis || (fallbackAnalysis(incident).analysis as Record<string, unknown>),
+      dispatch_plan: (agent.data as any)?.agent_output?.dispatch_plan || (fallbackAgent(incident).agent_output as any).dispatch_plan,
+      agent_output: (agent.data as any)?.agent_output || (fallbackAgent(incident).agent_output as Record<string, unknown>),
+      warnings
+    });
+
+    if (updated) {
+      saveSession(recordId, updated);
+    }
+
+    saveGraphEvent({
+      id: randomId('evt'),
+      org_id: orgId,
+      event_type: 'incident.orchestration.completed',
+      entity_id: recordId,
+      correlation_id: recordId,
+      payload: {
+        incident_id: recordId,
+        org_id: orgId,
+        status: updated?.status || 'processed',
+        degraded: warnings.length > 0,
+        service_calls: {
+          osint: osint.status,
+          inventory: inventory.status,
+          proximity: proximity.status,
+          routeCalculator: routeCalculator.status,
+          analysis: analysis.status,
+          agent: agent.status
+        },
+        updated_at: updatedAt
+      },
+      created_at: updatedAt
+    });
+  } catch (error) {
+    const updatedAt = new Date().toISOString();
+    const message = error instanceof Error ? error.message : 'Incident orchestration failed';
+    const updated = updateIncident(recordId, {
+      status: 'failed',
+      updated_at: updatedAt,
+      warnings: ['Incident orchestration failed', message]
+    });
+    if (updated) {
+      saveSession(recordId, updated);
+    }
+    saveGraphEvent({
+      id: randomId('evt'),
+      org_id: orgId,
+      event_type: 'incident.orchestration.failed',
+      entity_id: recordId,
+      correlation_id: recordId,
+      payload: {
+        incident_id: recordId,
+        org_id: orgId,
+        status: 'failed',
+        error: message,
+        updated_at: updatedAt
+      },
+      created_at: updatedAt
+    });
+  }
+}
+
+export async function orchestrateIncidentCreate(principal: RequestPrincipal, payload: unknown, orgId: string): Promise<Record<string, unknown>> {
+  const incident = normalizeIncident(payload, principal, orgId);
+
+  const record: IncidentRecord = {
+    id: String(incident.id || fallbackIncidentId(incident)),
+    org_id: orgId,
+    status: 'queued',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    incident,
+    services: {},
+    analysis: fallbackAnalysis(incident).analysis,
+    dispatch_plan: fallbackAgent(incident).agent_output.dispatch_plan,
+    agent_output: fallbackAgent(incident).agent_output,
+    warnings: ['Incident orchestration queued']
   };
 
   saveIncident(record);
   saveSession(String(record.id), record);
+  void runIncidentOrchestration(incident, principal, orgId, record.id);
 
   return {
     request_id: incident.id || record.id,
-    status: 'success',
+    status: 'accepted',
     data: record,
     meta: {
-      service_calls: { osint, inventory, proximity, routeCalculator, analysis, agent },
-      degraded: record.warnings.length > 0
+      queued: true,
+      async: true,
+      degraded: false
     }
   };
 }

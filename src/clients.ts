@@ -222,7 +222,7 @@ export async function callService<T = unknown>({
   method = 'POST',
   body,
   headers,
-  timeoutMs = 8000,
+  timeoutMs = 3000,
   allowFallback = true,
   retries
 }: CallOptions): Promise<ServiceCallResult<T>> {
@@ -249,14 +249,7 @@ export async function callService<T = unknown>({
     };
   }
 
-  const retryCount = Math.max(
-    0,
-    Number.isFinite(retries)
-      ? Number(retries)
-      : Number.isFinite(config.relationshipApiRetryCount)
-        ? config.relationshipApiRetryCount
-        : 2
-  );
+  const retryCount = Math.max(0, Number.isFinite(retries) ? Number(retries) : 1);
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {

@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { config } from './config';
 import { syncSupabaseRecord } from './external-sync';
+import { broadcastGraphEvent } from './realtime';
 import {
   AuditEntry,
   AiApprovalRecord,
@@ -230,6 +231,7 @@ export function updateIncident(id: string, patch: Partial<IncidentRecord>): Inci
   const next = { ...current, ...patch, updated_at: new Date().toISOString() };
   incidents.set(id, next);
   persistMap(incidents, filePaths.incidents);
+  syncSupabaseRecord('incidents', next);
   return next;
 }
 
@@ -392,6 +394,7 @@ export function saveGraphEvent(event: GraphEvent): GraphEvent {
   graphEvents.push(event);
   persistArray(graphEvents, filePaths.graphEvents);
   syncSupabaseRecord('relationship_events', event);
+  broadcastGraphEvent(event);
   void deliverGraphEvent(event);
   return event;
 }

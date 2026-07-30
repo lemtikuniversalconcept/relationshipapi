@@ -97,6 +97,7 @@ import {
   getRoutePlan,
   listRoutePlans
 } from './store';
+import { registerGraphEventListener } from './realtime';
 import { getServiceHealth, callService } from './clients';
 import {
   approveAction,
@@ -2436,6 +2437,67 @@ app.get(['/api/v1/events', '/v1/events'], async (request) => {
   return { ok: true, events: paged.items, page: paged.page };
 });
 
+app.get(['/api/v1/events/stream', '/v1/events/stream'], async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:read');
+  const query = request.query as Record<string, unknown>;
+  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const eventType = String(query.event_type || '');
+  const since = String(query.since || '');
+  const requestedLastEventId = String(query.last_event_id || '');
+
+  reply.raw.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    Connection: 'keep-alive',
+    'Cache-Control': 'no-cache, no-transform',
+    'X-Accel-Buffering': 'no'
+  });
+  reply.raw.write(`retry: 3000\n`);
+  reply.raw.write(`event: ready\ndata: ${JSON.stringify({ status: 'success', org_id: org, event_type: eventType || null })}\n\n`);
+
+  const writeEvent = (eventName: string, payload: unknown): void => {
+    reply.raw.write(`event: ${eventName}\n`);
+    reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const backlog = listGraphEvents(200).filter((event) => {
+    if (event.org_id !== org) return false;
+    if (eventType && event.event_type !== eventType) return false;
+    if (since && event.created_at <= since) return false;
+    if (requestedLastEventId && event.id <= requestedLastEventId) return false;
+    return true;
+  });
+
+  for (const event of backlog) {
+    writeEvent('graph', event);
+  }
+
+  const unsubscribe = registerGraphEventListener((event) => {
+    if (event.org_id !== org) return;
+    if (eventType && event.event_type !== eventType) return;
+    if (since && event.created_at <= since) return;
+    if (requestedLastEventId && event.id <= requestedLastEventId) return;
+    writeEvent('graph', event);
+  });
+
+  const heartbeat = setInterval(() => {
+    reply.raw.write(`: ping ${Date.now()}\n\n`);
+  }, 15000);
+
+  const cleanup = (): void => {
+    clearInterval(heartbeat);
+    unsubscribe();
+    try {
+      reply.raw.end();
+    } catch {
+      // Connection may already be closed.
+    }
+  };
+
+  request.raw.on('close', cleanup);
+  request.raw.on('aborted', cleanup);
+});
+
 app.get(['/api/v1/overrides/active', '/overrides/active'], async (request) => {
   const principal = principalFromRequest(request);
   const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
@@ -3102,13 +3164,13 @@ app.get(['/api/v1/intelligence/brief/:org', '/intelligence/brief/:org'], async (
   };
 });
 
-app.post(['/api/v1/incidents', '/incidents'], async (request) => {
+app.post(['/api/v1/incidents', '/incidents'], async (request, reply) => {
   const principal = principalFromRequest(request);
   const body = incidentSchema.parse(request.body || {});
   const org = assertOrgAccess(principal, String(body.org_id || ''));
   const response = await orchestrateIncidentCreate(principal, body, org);
   (request as any).serviceCalls = Object.keys((response as any).meta?.service_calls || {});
-  return response;
+  return reply.code(202).send(response);
 });
 
 app.get(['/api/v1/incidents/:id', '/incidents/:id'], async (request, reply) => {
