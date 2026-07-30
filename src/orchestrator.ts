@@ -981,7 +981,7 @@ async function runIncidentOrchestration(
       proximity,
       routeCalculator
     });
-    const analysis = await callService({ service: 'aiAnalysis', path: '/analyze', body: analysisRequest });
+    const analysis = await callService({ service: 'aiAnalysis', path: '/ai/analyze-incident', body: analysisRequest });
 
     const agent = await callService({
       service: 'mainAgent',
