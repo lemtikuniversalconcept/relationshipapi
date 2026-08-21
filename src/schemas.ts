@@ -740,6 +740,7 @@ export const aiGenerateSummarySchema = z.object({
 }).passthrough();
 
 export const consumerSessionIssueSchema = z.object({
+  org_id: z.string().optional(),
   location_id: z.string().optional(),
   guest_reference: z.string().optional(),
   expires_at: z.string()

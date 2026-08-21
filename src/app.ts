@@ -4225,8 +4225,13 @@ app.post(['/consumer/session/issue', '/api/v1/consumer/session/issue'], {
 }, async (request, reply) => {
   const principal = principalFromRequest(request);
   requireRole(principal, isElevatedRole, 'Manager or supervisor role required');
-  const body = (request as any).validatedBody as { location_id?: string; guest_reference?: string; expires_at: string };
-  const orgId = assertOrgAccess(principal, principal.org_id);
+  const body = (request as any).validatedBody as {
+    org_id?: string;
+    location_id?: string;
+    guest_reference?: string;
+    expires_at: string;
+  };
+  const orgId = assertOrgAccess(principal, body.org_id || principal.org_id);
   if (!orgId || orgId === config.orgDefault) {
     return reply.code(400).send({ status: 'error', error: 'A real organisation is required to issue a consumer session' });
   }
