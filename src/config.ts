@@ -1,5 +1,16 @@
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { ServiceConfig } from './types';
+
+// A non-secret, non-reversible label for an API key that has no explicit `sub`
+// configured. Never fall back to the raw key value here — it ends up in
+// principal.sub, which flows into audit records and payloads sent to other
+// services (e.g. buildAgentPayload's approval_officer_id), and a live key
+// leaking through one of those paths is exactly how a secret gets exposed
+// without anyone touching it directly.
+function safeKeyLabel(key: string): string {
+  return `api_key_${crypto.createHash('sha256').update(key).digest('hex').slice(0, 12)}`;
+}
 
 function env(name: string, fallback = ''): string {
   return process.env[name]?.trim() || fallback;
@@ -26,7 +37,7 @@ function parseApiKeys(): Array<{ key: string; org_id?: string; role?: string; su
         key,
         org_id: org_id || undefined,
         role: (role || 'service') as string,
-        sub: sub || key
+        sub: sub || safeKeyLabel(key)
       };
     });
 }

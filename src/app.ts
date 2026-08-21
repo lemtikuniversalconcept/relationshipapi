@@ -243,7 +243,10 @@ async function parsePrincipal(request: any): Promise<RequestPrincipal> {
   const matchingKey = config.apiKeys.find((entry) => entry.key === apiKey);
   if (matchingKey) {
     return {
-      sub: matchingKey.sub || matchingKey.key,
+      // Defense in depth: config.ts's parseApiKeys() already avoids defaulting
+      // sub to the raw key, but never fall back to the live secret here either —
+      // this value flows into audit records and inter-service payloads.
+      sub: matchingKey.sub || `api_key_${crypto.createHash('sha256').update(matchingKey.key).digest('hex').slice(0, 12)}`,
       org_id: matchingKey.org_id || headerOrg || config.orgDefault,
       role: (normalizeRole(matchingKey.role) as RequestPrincipal['role']) || 'service',
       scope: ['*'],
