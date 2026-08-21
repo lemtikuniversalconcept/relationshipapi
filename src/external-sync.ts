@@ -14,10 +14,21 @@ const TABLE_ALIASES: Record<string, string> = {
 // rejects the whole insert if any key is unrecognised, so these must be stripped before
 // syncing rather than merely being harmless extras.
 const OMIT_FIELDS: Partial<Record<string, string[]>> = {
-  // IncidentRecord nests the full graph payload under `incident`; the row it's synced
-  // into (created directly by the console app) already has that data under its own
-  // columns, so this key only exists to carry the orchestration output below it.
-  incidents: ['incident']
+  incidents: [
+    // IncidentRecord nests the full graph payload under `incident`; the row it's synced
+    // into (created directly by the console app) already has that data under its own
+    // columns, so this key only exists to carry the orchestration output below it.
+    'incident',
+    // `status` here is relationship_api's own processing-pipeline status (queued,
+    // processed, monitored, degraded, failed) — an internal bookkeeping vocabulary,
+    // not the incident's real-world lifecycle. Supabase's incidents.status is a
+    // strict enum (reported/acknowledged/responding/contained/resolved/escalated/
+    // closed) owned by the console app's own status-transition flow. Writing our
+    // internal status into that column always failed the enum check and silently
+    // blocked the whole row (analysis, dispatch_plan, warnings included) from
+    // ever syncing. Never write it.
+    'status'
+  ]
 };
 
 function canonicalTableName(table: string): string {
