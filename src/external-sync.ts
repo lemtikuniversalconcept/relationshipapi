@@ -13,6 +13,16 @@ const TABLE_ALIASES: Record<string, string> = {
 // Fields on our internal record shapes that have no matching Supabase column. PostgREST
 // rejects the whole insert if any key is unrecognised, so these must be stripped before
 // syncing rather than merely being harmless extras.
+// Tables whose rows relationship_api never originates — the console app always
+// creates them first — so syncing is always an update of an existing row, never
+// an insert. POST-based upsert (resolution=merge-duplicates) still validates
+// NOT NULL constraints against the insert branch even when the conflict path is
+// the one that actually runs, so any column we don't happen to send (severity,
+// title, reported_by, ...) can fail the whole sync even though it was never
+// meant to change. A real PATCH only touches columns present in the body and
+// carries no such requirement.
+const PATCH_ONLY_TABLES = new Set(['incidents']);
+
 const OMIT_FIELDS: Partial<Record<string, string[]>> = {
   incidents: [
     // IncidentRecord nests the full graph payload under `incident`; the row it's synced
@@ -115,22 +125,37 @@ async function postSupabase<T extends Record<string, unknown>>(table: string, re
   for (const field of OMIT_FIELDS[canonicalTable] || []) {
     delete (normalizedRecord as Record<string, unknown>)[field];
   }
-  const url = new URL(`/rest/v1/${canonicalTable}`, config.supabaseUrl);
+
+  const patchOnly = PATCH_ONLY_TABLES.has(canonicalTable);
   const key = conflictKeyForTable(canonicalTable, normalizedRecord);
-  if (key) url.searchParams.set('on_conflict', key);
+  const url = new URL(`/rest/v1/${canonicalTable}`, config.supabaseUrl);
+  const headers: Record<string, string> = {
+    apikey: config.supabaseServiceKey,
+    Authorization: `Bearer ${config.supabaseServiceKey}`,
+    'Content-Type': 'application/json',
+    Prefer: 'return=representation'
+  };
+  let method = 'POST';
+  let body = normalizedRecord as Record<string, unknown>;
+
+  if (patchOnly && key) {
+    method = 'PATCH';
+    url.searchParams.set(key, `eq.${String(normalizedRecord[key])}`);
+    const { [key]: _omitKey, ...rest } = normalizedRecord;
+    body = rest;
+  } else {
+    headers.Prefer = 'resolution=merge-duplicates,return=representation';
+    if (key) url.searchParams.set('on_conflict', key);
+  }
+
   const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      apikey: config.supabaseServiceKey,
-      Authorization: `Bearer ${config.supabaseServiceKey}`,
-      'Content-Type': 'application/json',
-      Prefer: 'resolution=merge-duplicates,return=representation'
-    },
-    body: JSON.stringify(normalizedRecord)
+    method,
+    headers,
+    body: JSON.stringify(body)
   });
   if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`Supabase sync failed for ${canonicalTable}: ${response.status} ${body}`.trim());
+    const responseBody = await response.text().catch(() => '');
+    throw new Error(`Supabase sync failed for ${canonicalTable}: ${response.status} ${responseBody}`.trim());
   }
 }
 
