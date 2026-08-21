@@ -52,6 +52,7 @@ import {
   consumerReportSchema,
   consumerReportUpdateSchema,
   consumerAiQuerySchema,
+  forensicAiQuerySchema,
   toBool,
   toNumber
 } from './schemas';
@@ -67,6 +68,7 @@ import {
   ConsumerSession
 } from './consumer';
 import { queryMetaAI } from './meta-ai';
+import { getForensicCase, getForensicTimeline, getForensicEvidence } from './forensic';
 import {
   findRelationshipsByEntity,
   getAiOperation,
@@ -4449,6 +4451,106 @@ app.post(['/consumer/ai/query', '/api/v1/consumer/ai/query'], {
 
   return {
     response: result.response,
+    ai_generated: result.aiGenerated,
+    model: result.model,
+    model_provider: result.modelProvider
+  };
+});
+
+// ---------------------------------------------------------------------------
+// Forensic analyst read views
+// ---------------------------------------------------------------------------
+
+function requireForensicOrg(request: any): { orgId: string } | null {
+  const principal = principalFromRequest(request);
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const query = (request.query || {}) as Record<string, string>;
+  const orgId = assertOrgAccess(principal, query.org_id || principal.org_id);
+  if (!orgId || orgId === config.orgDefault) return null;
+  return { orgId };
+}
+
+app.get(['/forensic/case/:incident_id', '/api/v1/forensic/case/:incident_id'], async (request, reply) => {
+  const ctx = requireForensicOrg(request);
+  if (!ctx) return reply.code(400).send({ status: 'error', error: 'A real organisation is required' });
+  const { incident_id } = request.params as { incident_id: string };
+  const result = await getForensicCase(incident_id, ctx.orgId);
+  if (!result) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
+  return { status: 'success', ...result };
+});
+
+app.get(['/forensic/timeline/:incident_id', '/api/v1/forensic/timeline/:incident_id'], async (request, reply) => {
+  const ctx = requireForensicOrg(request);
+  if (!ctx) return reply.code(400).send({ status: 'error', error: 'A real organisation is required' });
+  const { incident_id } = request.params as { incident_id: string };
+  const timeline = await getForensicTimeline(incident_id, ctx.orgId);
+  if (!timeline) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
+  return { status: 'success', timeline };
+});
+
+app.get(['/forensic/evidence/:incident_id', '/api/v1/forensic/evidence/:incident_id'], async (request, reply) => {
+  const ctx = requireForensicOrg(request);
+  if (!ctx) return reply.code(400).send({ status: 'error', error: 'A real organisation is required' });
+  const { incident_id } = request.params as { incident_id: string };
+  const evidence = await getForensicEvidence(incident_id, ctx.orgId);
+  if (!evidence) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
+  return { status: 'success', ...evidence };
+});
+
+app.post(['/forensic/ai/query', '/api/v1/forensic/ai/query'], {
+  preValidation: validateBodySchema(forensicAiQuerySchema, 'forensic ai query')
+}, async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = (request as any).validatedBody as {
+    org_id: string;
+    analyst_id: string;
+    incident_id: string;
+    query: string;
+    mode: 'plain' | 'technical';
+    conversation_history: { role: 'user' | 'assistant'; content: string }[];
+  };
+  const orgId = assertOrgAccess(principal, body.org_id);
+  if (!orgId || orgId === config.orgDefault) {
+    return reply.code(400).send({ status: 'error', error: 'A real organisation is required' });
+  }
+
+  const caseSummary = await getForensicCase(body.incident_id, orgId);
+  if (!caseSummary) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
+
+  const started = Date.now();
+  const result = await queryMetaAI({
+    requestId: crypto.randomUUID(),
+    mode: 'forensic',
+    query: body.query,
+    responseMode: body.mode,
+    context: {
+      incident: caseSummary.incident,
+      officers_involved: caseSummary.officers_involved,
+      ai_analyses: caseSummary.ai_analyses,
+      consumer_reports: caseSummary.consumer_reports,
+      autonomous_actions: caseSummary.autonomous_actions
+    },
+    conversationHistory: body.conversation_history
+  });
+
+  void supabaseInsert('forensic_ai_queries', {
+    analyst_id: body.analyst_id,
+    organisation_id: orgId,
+    incident_id: body.incident_id,
+    query_text: body.query,
+    response_text: result.response,
+    response_mode: body.mode,
+    model_used: result.model,
+    confidence: result.confidence,
+    latency_ms: Date.now() - started
+  }).catch((error) => console.error('forensic_ai_queries insert failed', error));
+
+  return {
+    status: 'success',
+    response: result.response,
+    sources: result.sources,
+    confidence: result.confidence,
     ai_generated: result.aiGenerated,
     model: result.model,
     model_provider: result.modelProvider

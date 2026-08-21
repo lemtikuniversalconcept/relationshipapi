@@ -784,3 +784,12 @@ export const consumerAiQuerySchema = z.object({
   query: z.string().min(1),
   conversation_history: z.array(conversationTurnSchema).optional().default([])
 });
+
+export const forensicAiQuerySchema = z.object({
+  org_id: z.string(),
+  analyst_id: z.string(),
+  incident_id: z.string(),
+  query: z.string().min(1),
+  mode: z.enum(['plain', 'technical']).optional().default('plain'),
+  conversation_history: z.array(conversationTurnSchema).optional().default([])
+});

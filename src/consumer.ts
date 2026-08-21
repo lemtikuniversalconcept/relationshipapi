@@ -29,11 +29,20 @@ function requireSupabase(): void {
 
 export async function supabaseSelect<T = Record<string, unknown>>(
   table: string,
-  query: Record<string, string>
+  query: Record<string, string | string[]>
 ): Promise<T[]> {
   requireSupabase();
   const url = new URL(`/rest/v1/${table}`, config.supabaseUrl);
-  for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
+  for (const [key, value] of Object.entries(query)) {
+    // PostgREST allows repeating a filter column with different operators (e.g. two
+    // `timestamp` bounds for a range) — arrays let callers express that instead of
+    // the last one silently overwriting the first.
+    if (Array.isArray(value)) {
+      for (const v of value) url.searchParams.append(key, v);
+    } else {
+      url.searchParams.set(key, value);
+    }
+  }
   const response = await fetch(url, { headers: supabaseHeaders() });
   if (!response.ok) {
     const body = await response.text().catch(() => '');
@@ -114,6 +123,22 @@ export async function signStorageUrl(bucket: string, path: string, expiresInSeco
   }
   const data = (await response.json()) as { signedURL?: string };
   return `${config.supabaseUrl}/storage/v1${data.signedURL || ''}`;
+}
+
+// Evidence/media paths in forensic views are frequently missing or point at objects
+// that were never actually uploaded (e.g. a stub snapshot_ref) — signing those
+// shouldn't take down the whole case view, so this swallows failures into null.
+export async function signStorageUrlIfNeeded(
+  bucket: string,
+  path: string,
+  expiresInSeconds: number
+): Promise<string | null> {
+  if (!bucket || !path) return null;
+  try {
+    return await signStorageUrl(bucket, path, expiresInSeconds);
+  } catch {
+    return null;
+  }
 }
 
 export function haversineDistanceM(lat1: number, lng1: number, lat2: number, lng2: number): number {
