@@ -738,3 +738,48 @@ export const aiGenerateSummarySchema = z.object({
   range_label: z.string().optional(),
   commentary: z.string().optional()
 }).passthrough();
+
+export const consumerSessionIssueSchema = z.object({
+  location_id: z.string().optional(),
+  guest_reference: z.string().optional(),
+  expires_at: z.string()
+});
+
+export const consumerSessionActivateSchema = z.object({
+  token: z.string().min(1),
+  device_wifi_ssid: z.string().optional(),
+  device_lat: z.number().optional(),
+  device_lng: z.number().optional()
+});
+
+export const consumerReportSchema = z.object({
+  report_type: z.string().optional().default('emergency'),
+  description: z.string().optional(),
+  location_text: z.string().optional(),
+  lat: z.number().optional(),
+  lng: z.number().optional(),
+  accuracy_m: z.number().optional(),
+  ai_transcription: z.string().optional(),
+  ai_language: z.string().optional()
+});
+
+export const consumerReportUpdateSchema = z.object({
+  description: z.string().optional(),
+  location_text: z.string().optional(),
+  lat: z.number().optional(),
+  lng: z.number().optional(),
+  accuracy_m: z.number().optional(),
+  ai_transcription: z.string().optional(),
+  ai_language: z.string().optional()
+});
+
+export const conversationTurnSchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  content: z.string()
+});
+
+export const consumerAiQuerySchema = z.object({
+  report_id: z.string().optional(),
+  query: z.string().min(1),
+  conversation_history: z.array(conversationTurnSchema).optional().default([])
+});

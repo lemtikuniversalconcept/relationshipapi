@@ -1,6 +1,7 @@
 // @ts-nocheck
 import fastify from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
 import { config, hasExternalBackend, isAdminRole, isElevatedRole, normalizeRole } from './config';
@@ -46,9 +47,26 @@ import {
   cctvJudgementAnalyzeSchema,
   cctvReidCorrelateSchema,
   aiGenerateSummarySchema,
+  consumerSessionIssueSchema,
+  consumerSessionActivateSchema,
+  consumerReportSchema,
+  consumerReportUpdateSchema,
+  consumerAiQuerySchema,
   toBool,
   toNumber
 } from './schemas';
+import {
+  generateConsumerToken,
+  supabaseSelect,
+  supabaseInsert,
+  supabaseUpdate,
+  lookupConsumerSession,
+  validateConsumerSession,
+  triageConsumerReport,
+  uploadToStorage,
+  ConsumerSession
+} from './consumer';
+import { queryMetaAI } from './meta-ai';
 import {
   findRelationshipsByEntity,
   getAiOperation,
@@ -132,6 +150,10 @@ void app.register(cors, {
     return cb(new Error('CORS origin not allowed'), false);
   },
   credentials: true
+});
+
+void app.register(multipart, {
+  limits: { fileSize: 25 * 1024 * 1024, files: 1 }
 });
 
 function enableRouteAliasArrays(instance: typeof app): void {
@@ -1594,7 +1616,13 @@ app.addHook('preHandler', async (request, reply) => {
     path.startsWith('/api/v1/ready') ||
     path.startsWith('/masterai/health') ||
     path.startsWith('/api/v1/masterai/health');
-  if (isPublic) return;
+  // Consumer PWA endpoints authenticate with X-Consumer-Token (a per-session token
+  // issued at guest check-in), not a JWT/API-key/webhook principal — the guest's
+  // browser has none of those. session/issue is the one exception: only an
+  // authenticated operator/manager can mint a new consumer token.
+  const isConsumerPath = path.startsWith('/consumer/') || path.startsWith('/api/v1/consumer/');
+  const isConsumerPublic = isConsumerPath && !path.includes('/consumer/session/issue');
+  if (isPublic || isConsumerPublic) return;
   try {
     const principal = await parsePrincipal(request);
     request.principal = principal;
@@ -4171,6 +4199,254 @@ app.get(['/api/v1/system/overview', '/system/overview'], async (request) => {
         resend: hasExternalBackend('resend')
       }
     }
+  };
+});
+
+// ---------------------------------------------------------------------------
+// Consumer emergency PWA
+// ---------------------------------------------------------------------------
+
+async function requireConsumerSession(request: any, reply: any): Promise<ConsumerSession | null> {
+  const token = String(request.headers['x-consumer-token'] || '');
+  if (!token) {
+    reply.code(401).send({ status: 'error', error: 'Missing X-Consumer-Token header' });
+    return null;
+  }
+  const session = await lookupConsumerSession(token);
+  if (!session || !session.is_active || new Date(session.expires_at).getTime() < Date.now()) {
+    reply.code(401).send({ status: 'error', error: 'Consumer session is invalid or expired' });
+    return null;
+  }
+  return session;
+}
+
+app.post(['/consumer/session/issue', '/api/v1/consumer/session/issue'], {
+  preValidation: validateBodySchema(consumerSessionIssueSchema, 'consumer session issue')
+}, async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireRole(principal, isElevatedRole, 'Manager or supervisor role required');
+  const body = (request as any).validatedBody as { location_id?: string; guest_reference?: string; expires_at: string };
+  const orgId = assertOrgAccess(principal, principal.org_id);
+  if (!orgId || orgId === config.orgDefault) {
+    return reply.code(400).send({ status: 'error', error: 'A real organisation is required to issue a consumer session' });
+  }
+
+  const token = generateConsumerToken();
+  const session = await supabaseInsert<ConsumerSession & { premises_radius_m: number }>('consumer_sessions', {
+    organisation_id: orgId,
+    location_id: body.location_id || null,
+    token,
+    guest_reference: body.guest_reference || null,
+    premises_radius_m: config.consumerSessionDefaultRadiusM,
+    expires_at: body.expires_at,
+    created_by: principal.sub !== 'service' && principal.sub !== 'dev-local' ? principal.sub : null,
+    is_active: true
+  });
+
+  return {
+    status: 'success',
+    token: session.token,
+    qr_code_url: `${config.consumerPwaBaseUrl}/activate?token=${session.token}`,
+    expires_at: session.expires_at
+  };
+});
+
+app.post(['/consumer/session/activate', '/api/v1/consumer/session/activate'], {
+  preValidation: validateBodySchema(consumerSessionActivateSchema, 'consumer session activate')
+}, async (request, reply) => {
+  const body = (request as any).validatedBody as {
+    token: string;
+    device_wifi_ssid?: string;
+    device_lat?: number;
+    device_lng?: number;
+  };
+  const { valid, reason, session } = await validateConsumerSession(body.token, {
+    lat: body.device_lat,
+    lng: body.device_lng,
+    wifiSsid: body.device_wifi_ssid
+  });
+  if (!valid || !session) {
+    return reply.code(reason === 'outside_premises' ? 403 : 401).send({ status: 'error', valid: false, reason });
+  }
+
+  const [updatedSession] = await supabaseUpdate<ConsumerSession>(
+    'consumer_sessions',
+    { id: session.id },
+    {
+      activated_at: session.activated_at || new Date().toISOString(),
+      wifi_ssids: body.device_wifi_ssid
+        ? Array.from(new Set([...(session.wifi_ssids || []), body.device_wifi_ssid]))
+        : session.wifi_ssids
+    }
+  );
+  const orgRows = await supabaseSelect<{ id: string; name: string }>('organisations', {
+    id: `eq.${session.organisation_id}`,
+    select: 'id,name',
+    limit: '1'
+  });
+  const organisation = orgRows[0];
+  const effectiveSession = updatedSession || session;
+
+  return {
+    status: 'activated',
+    session_id: session.id,
+    organisation_name: organisation?.name || 'Lemtik Security',
+    expires_at: effectiveSession.expires_at,
+    geofence: {
+      lat: effectiveSession.premises_lat,
+      lng: effectiveSession.premises_lng,
+      radius_m: effectiveSession.premises_radius_m || config.consumerSessionDefaultRadiusM
+    },
+    allowed_ssids: effectiveSession.wifi_ssids || []
+  };
+});
+
+app.get(['/consumer/session/validate', '/api/v1/consumer/session/validate'], async (request, reply) => {
+  const token = String(request.headers['x-consumer-token'] || '');
+  const query = (request.query || {}) as Record<string, string>;
+  const lat = query.lat ? Number(query.lat) : undefined;
+  const lng = query.lng ? Number(query.lng) : undefined;
+  const { valid, reason } = await validateConsumerSession(token, { lat, lng, wifiSsid: query.wifi_ssid });
+  return { valid, reason: reason || null };
+});
+
+app.post(['/consumer/report', '/api/v1/consumer/report'], {
+  preValidation: validateBodySchema(consumerReportSchema, 'consumer report')
+}, async (request, reply) => {
+  const session = await requireConsumerSession(request, reply);
+  if (!session) return;
+  const body = (request as any).validatedBody as {
+    report_type?: string;
+    description?: string;
+    location_text?: string;
+    lat?: number;
+    lng?: number;
+    accuracy_m?: number;
+    ai_transcription?: string;
+    ai_language?: string;
+  };
+
+  const report = await supabaseInsert<{ id: string; status: string }>('consumer_reports', {
+    session_id: session.id,
+    organisation_id: session.organisation_id,
+    report_type: body.report_type || 'emergency',
+    description: body.description || null,
+    location_text: body.location_text || null,
+    lat: body.lat ?? null,
+    lng: body.lng ?? null,
+    accuracy_m: body.accuracy_m ?? null,
+    ai_transcription: body.ai_transcription || null,
+    ai_language: body.ai_language || null,
+    status: 'received'
+  });
+
+  triageConsumerReport({
+    reportId: report.id,
+    orgId: session.organisation_id,
+    description: body.description || body.ai_transcription || '',
+    locationText: body.location_text,
+    lat: body.lat,
+    lng: body.lng
+  });
+
+  return { report_id: report.id, status: report.status, message: 'Your report has been received. Help is on the way.' };
+});
+
+app.patch(['/consumer/report/:report_id', '/api/v1/consumer/report/:report_id'], {
+  preValidation: validateBodySchema(consumerReportUpdateSchema, 'consumer report update')
+}, async (request, reply) => {
+  const session = await requireConsumerSession(request, reply);
+  if (!session) return;
+  const { report_id } = request.params as { report_id: string };
+  const body = (request as any).validatedBody as Record<string, unknown>;
+  const [updated] = await supabaseUpdate<{ id: string; status: string }>(
+    'consumer_reports',
+    { id: report_id, session_id: session.id },
+    body
+  );
+  if (!updated) return reply.code(404).send({ status: 'error', error: 'Report not found for this session' });
+  return { report_id: updated.id, status: updated.status };
+});
+
+app.post(['/consumer/report/:report_id/media', '/api/v1/consumer/report/:report_id/media'], async (request, reply) => {
+  const session = await requireConsumerSession(request, reply);
+  if (!session) return;
+  const { report_id } = request.params as { report_id: string };
+
+  const [report] = await supabaseSelect<{ id: string }>('consumer_reports', {
+    id: `eq.${report_id}`,
+    session_id: `eq.${session.id}`,
+    select: 'id',
+    limit: '1'
+  });
+  if (!report) return reply.code(404).send({ status: 'error', error: 'Report not found for this session' });
+
+  const file = await (request as any).file();
+  if (!file) return reply.code(400).send({ status: 'error', error: 'No file provided' });
+  const fields = file.fields as Record<string, { value?: string }>;
+  const mediaType = String(fields?.media_type?.value || '');
+  const chunkIndex = fields?.chunk_index?.value ? Number(fields.chunk_index.value) : null;
+  if (!['photo', 'video_chunk', 'audio_chunk', 'video_complete', 'audio_complete'].includes(mediaType)) {
+    return reply.code(400).send({ status: 'error', error: 'Invalid media_type' });
+  }
+
+  const buffer = await file.toBuffer();
+  const extension = (file.filename || '').split('.').pop() || 'bin';
+  const objectPath = `${report_id}/${mediaType}_${chunkIndex ?? Date.now()}_${crypto.randomUUID()}.${extension}`;
+  await uploadToStorage(config.consumerMediaBucket, objectPath, buffer, file.mimetype || 'application/octet-stream');
+
+  const media = await supabaseInsert<{ id: string; storage_path: string }>('consumer_report_media', {
+    report_id,
+    media_type: mediaType,
+    storage_path: `${config.consumerMediaBucket}/${objectPath}`,
+    chunk_index: chunkIndex
+  });
+
+  return { media_id: media.id, storage_path: media.storage_path };
+});
+
+app.get(['/consumer/report/:report_id/status', '/api/v1/consumer/report/:report_id/status'], async (request, reply) => {
+  const session = await requireConsumerSession(request, reply);
+  if (!session) return;
+  const { report_id } = request.params as { report_id: string };
+  const [report] = await supabaseSelect<{ id: string; status: string; created_at: string; incident_id: string | null }>(
+    'consumer_reports',
+    { id: `eq.${report_id}`, session_id: `eq.${session.id}`, select: 'id,status,created_at,incident_id', limit: '1' }
+  );
+  if (!report) return reply.code(404).send({ status: 'error', error: 'Report not found for this session' });
+  return { report_id: report.id, status: report.status, created_at: report.created_at, linked_incident: Boolean(report.incident_id) };
+});
+
+app.post(['/consumer/ai/query', '/api/v1/consumer/ai/query'], {
+  preValidation: validateBodySchema(consumerAiQuerySchema, 'consumer ai query')
+}, async (request, reply) => {
+  const session = await requireConsumerSession(request, reply);
+  if (!session) return;
+  const body = (request as any).validatedBody as {
+    report_id?: string;
+    query: string;
+    conversation_history: { role: 'user' | 'assistant'; content: string }[];
+  };
+
+  const [organisation] = await supabaseSelect<{ name: string }>('organisations', {
+    id: `eq.${session.organisation_id}`,
+    select: 'name',
+    limit: '1'
+  });
+
+  const result = await queryMetaAI({
+    requestId: crypto.randomUUID(),
+    mode: 'consumer',
+    query: body.query,
+    context: { organisation_name: organisation?.name || 'this premises', report_id: body.report_id || null },
+    conversationHistory: body.conversation_history
+  });
+
+  return {
+    response: result.response,
+    ai_generated: result.aiGenerated,
+    model: result.model,
+    model_provider: result.modelProvider
   };
 });
 

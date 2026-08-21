@@ -91,6 +91,11 @@ export const config = {
   blobStorageContainer: firstEnv(['BLOB_STORAGE_CONTAINER', 'BLOB_CONTAINER_NAME'], 'relationship-api'),
   blobStorageKey: firstEnv(['BLOB_STORAGE_KEY', 'AZURE_STORAGE_KEY']),
   orgDefault: firstEnv(['LEMTIK_DEFAULT_ORG_ID', 'ORG_ID', 'DEFAULT_ORG_ID'], 'default'),
+  consumerMediaBucket: firstEnv(['CONSUMER_MEDIA_BUCKET'], 'consumer-media'),
+  consumerMediaSignedUrlExpirySeconds: Number(firstEnv(['CONSUMER_MEDIA_SIGNED_URL_EXPIRY_SECONDS'], '3600')),
+  consumerTokenPrefix: firstEnv(['CONSUMER_TOKEN_PREFIX'], 'LMT-'),
+  consumerSessionDefaultRadiusM: Number(firstEnv(['CONSUMER_SESSION_DEFAULT_RADIUS_M'], '300')),
+  consumerPwaBaseUrl: firstEnv(['CONSUMER_PWA_BASE_URL'], 'https://app.lemtik.com.ng/consumer'),
   services: {
     osint: {
       name: 'osint',
