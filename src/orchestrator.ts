@@ -19,7 +19,7 @@ import {
   qwenRecommendResponseResponseSchema,
   qwenRecommendResponseSchema
 } from './schemas';
-import { saveAiApproval, saveAiOperation, saveSession, saveIncident, updateIncident, saveOverride, saveGraphEvent, getAiOperation } from './store';
+import { saveAiApproval, saveAiOperation, saveSession, saveIncident, updateIncident, saveOverride, saveGraphEvent, getAiOperation, recordAiRecommendationActivity } from './store';
 
 function randomId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
@@ -1110,6 +1110,26 @@ async function runIncidentOrchestration(
     if (updated) {
       saveSession(recordId, updated);
     }
+
+    const recommendedDispatchPlan = updated?.dispatch_plan || {};
+    const recommendedOfficerCount = Array.isArray((recommendedDispatchPlan as any)?.officers_dispatched)
+      ? (recommendedDispatchPlan as any).officers_dispatched.length
+      : 0;
+    recordAiRecommendationActivity({
+      incidentId: recordId,
+      orgId,
+      message:
+        `AI recommended a response: ${recommendedOfficerCount} officer(s), ` +
+        `${(recommendedDispatchPlan as any)?.eta_minutes ?? 'unknown'} min ETA` +
+        (agent.fallback ? ' (fallback heuristic — mainAgent unavailable)' : ' (AI-generated)'),
+      meta: {
+        dispatch_plan: recommendedDispatchPlan,
+        analysis: updated?.analysis || {},
+        confidence: (agent.data as any)?.agent_output?.confidence ?? null,
+        ai_generated: !agent.fallback && agent.ok,
+        jobs_run: [...jobServices]
+      }
+    });
 
     saveGraphEvent({
       id: randomId('evt'),

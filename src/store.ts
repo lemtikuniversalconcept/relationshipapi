@@ -501,6 +501,31 @@ export function listInventoryAlerts(orgId?: string): InventoryAlert[] {
   return [...inventoryAlerts.values()].filter((alert) => !orgId || alert.org_id === orgId);
 }
 
+// Records an incident_activity row of kind 'ai_recommendation'. That kind (and
+// 'operator_decision', written by the console app when an operator acts on it)
+// is append-only at the database level — see the c4isod migration
+// 20260821120000_lock_ai_recommendation_activity.sql. This function does not
+// keep a local copy; it exists purely to reach Supabase, which is the durable
+// record here.
+export function recordAiRecommendationActivity(params: {
+  incidentId: string;
+  orgId: string;
+  message: string;
+  meta: Record<string, unknown>;
+}): void {
+  syncSupabaseRecord('incident_activity', {
+    id: crypto.randomUUID(),
+    incident_id: params.incidentId,
+    organisation_id: params.orgId,
+    actor_id: null,
+    actor_name: 'Lemtik AI',
+    kind: 'ai_recommendation',
+    message: params.message,
+    meta: params.meta,
+    created_at: new Date().toISOString()
+  });
+}
+
 export function saveRoutePlan(route: RoutePlanRecord): RoutePlanRecord {
   routePlans.set(route.route_id, route);
   persistMap(routePlans, filePaths.routePlans);
