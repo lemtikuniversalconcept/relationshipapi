@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { callService } from './clients';
+import { callService, ServiceCallResult } from './clients';
 import { config } from './config';
 import { IncidentRecord, RequestPrincipal } from './types';
 import {
@@ -934,6 +934,52 @@ export async function fetchMasterAiSession(requestId: string): Promise<Record<st
   return undefined;
 }
 
+function skippedServiceResult(service: ServiceCallResult['service']): ServiceCallResult {
+  return { ok: true, status: 200, data: { skipped: true, reason: 'not required by AI triage' }, duration_ms: 0, fallback: false, service };
+}
+
+async function triageIncident(
+  incident: Record<string, unknown>,
+  orgId: string
+): Promise<{ jobServices: Set<string>; triage: Record<string, unknown>; upstream: ServiceCallResult; aiDecided: boolean; warnings: string[] }> {
+  const location = (incident.location as Record<string, unknown>) || {};
+  const upstream = await callService({
+    service: 'mainAgent',
+    path: '/triage',
+    body: {
+      request_type: 'agent_triage',
+      request_id: randomId('req'),
+      org_id: orgId,
+      incident_raw: {
+        description: String(incident.description || ''),
+        reported_by: String(incident.reporter_id || ''),
+        location_stated: String(location.name || location.description || ''),
+        building: location.building_id ? String(location.building_id) : undefined,
+        floor: typeof location.floor === 'number' ? location.floor : undefined,
+        zone: location.zone ? String(location.zone) : undefined,
+        lat: typeof location.lat === 'number' ? location.lat : undefined,
+        lng: typeof location.lng === 'number' ? location.lng : undefined,
+        timestamp: String(incident.reported_at || new Date().toISOString()),
+        source: String(incident.client_type || 'unknown')
+      }
+    },
+    timeoutMs: 12000
+  });
+  const data = (upstream.data as Record<string, unknown>) || {};
+  const triage = (data.triage as Record<string, unknown>) || {};
+  const jobsNeeded = Array.isArray(data.jobs_needed) ? (data.jobs_needed as Array<Record<string, unknown>>) : [];
+  const jobServices = new Set(jobsNeeded.map((job) => String(job.service)));
+  // masterai's real (AI-backed) response never sets a "needs_response" flag directly — the
+  // reliable signal, true for both the live AI and the local heuristic fallback, is whether
+  // anything beyond pure information-gathering (osint_brain) was requested.
+  const aiDecided = upstream.ok && !upstream.fallback && Boolean(data.model_provider);
+  const warnings = [
+    ...(!upstream.ok || upstream.fallback ? ['Triage fallback used'] : []),
+    ...(!aiDecided ? ['Triage decision made by local/keyword heuristic, not by the AI model'] : [])
+  ];
+  return { jobServices, triage, upstream, aiDecided, warnings };
+}
+
 async function runIncidentOrchestration(
   incident: Record<string, unknown>,
   principal: RequestPrincipal,
@@ -941,15 +987,63 @@ async function runIncidentOrchestration(
   recordId: string
 ): Promise<void> {
   try {
+    const { jobServices, triage, upstream: triageUpstream, aiDecided, warnings: triageWarnings } = await triageIncident(incident, orgId);
+    const needsFullResponse = [...jobServices].some((service) => service !== 'osint_brain');
+
+    if (jobServices.size === 0) {
+      // Triage couldn't be reached or returned nothing usable — fail open to the full
+      // pipeline rather than silently dropping a real incident on the floor.
+      jobServices.add('osint_brain');
+      jobServices.add('proximity_finder');
+      jobServices.add('inventory_service');
+      jobServices.add('route_calculator');
+    }
+
+    if (!needsFullResponse) {
+      const osintOnly = jobServices.has('osint_brain')
+        ? await callService({ service: 'osint', path: '/brain/query', body: buildOsintPayload(incident), timeoutMs: 12000 })
+        : skippedServiceResult('osint');
+      const updatedAt = new Date().toISOString();
+      const updated = updateIncident(recordId, {
+        status: 'monitored',
+        updated_at: updatedAt,
+        services: { triage: triageUpstream, osint: osintOnly },
+        analysis: {
+          threat_assessment: { threat_level: 'low', reasoning: 'AI triage determined this report is informational and does not require an active dispatch response.' },
+          triage
+        },
+        dispatch_plan: {},
+        agent_output: {},
+        warnings: triageWarnings
+      });
+      if (updated) saveSession(recordId, updated);
+      saveGraphEvent({
+        id: randomId('evt'),
+        org_id: orgId,
+        event_type: 'incident.triage.monitored_only',
+        entity_id: recordId,
+        correlation_id: recordId,
+        payload: { incident_id: recordId, org_id: orgId, triage, ai_decided: aiDecided, updated_at: updatedAt },
+        created_at: updatedAt
+      });
+      return;
+    }
+
     const [osint, inventory, proximity] = await Promise.all([
-      callService({ service: 'osint', path: '/brain/query', body: buildOsintPayload(incident), timeoutMs: 12000 }),
-      callService({ service: 'inventory', path: '/query', body: buildInventoryPayload(orgId, incident) }),
-      callService({
-        service: 'proximity',
-        path: '/find',
-        body: buildProximityPayload(orgId, incident),
-        timeoutMs: 12000
-      })
+      jobServices.has('osint_brain')
+        ? callService({ service: 'osint', path: '/brain/query', body: buildOsintPayload(incident), timeoutMs: 12000 })
+        : Promise.resolve(skippedServiceResult('osint')),
+      jobServices.has('inventory_service')
+        ? callService({ service: 'inventory', path: '/query', body: buildInventoryPayload(orgId, incident) })
+        : Promise.resolve(skippedServiceResult('inventory')),
+      jobServices.has('proximity_finder')
+        ? callService({
+            service: 'proximity',
+            path: '/find',
+            body: buildProximityPayload(orgId, incident),
+            timeoutMs: 12000
+          })
+        : Promise.resolve(skippedServiceResult('proximity'))
     ]);
 
     const responders = {
@@ -965,11 +1059,13 @@ async function runIncidentOrchestration(
           .filter(Boolean)
     };
 
-    const routeCalculator = await callService({
-      service: 'routeCalculator',
-      path: '/route/calculate',
-      body: buildRoutePayload(orgId, incident, responders)
-    });
+    const routeCalculator = jobServices.has('route_calculator')
+      ? await callService({
+          service: 'routeCalculator',
+          path: '/route/calculate',
+          body: buildRoutePayload(orgId, incident, responders)
+        })
+      : skippedServiceResult('routeCalculator');
 
     const analysisRequest = buildAnalysisPayload(incident, {
       osint,
@@ -992,6 +1088,7 @@ async function runIncidentOrchestration(
     });
 
     const warnings = [
+      ...triageWarnings,
       ...(osint.fallback ? ['OSINT fallback used'] : []),
       ...(inventory.fallback ? ['Inventory fallback used'] : []),
       ...(proximity.fallback ? ['Proximity fallback used'] : []),
@@ -1003,7 +1100,7 @@ async function runIncidentOrchestration(
     const updated = updateIncident(recordId, {
       status: warnings.length > 0 ? 'degraded' : 'processed',
       updated_at: updatedAt,
-      services: { osint, inventory, proximity, routeCalculator, analysis, agent },
+      services: { triage: triageUpstream, osint, inventory, proximity, routeCalculator, analysis, agent },
       analysis: (analysis.data as any)?.analysis || (fallbackAnalysis(incident).analysis as Record<string, unknown>),
       dispatch_plan: (agent.data as any)?.agent_output?.dispatch_plan || (fallbackAgent(incident).agent_output as any).dispatch_plan,
       agent_output: (agent.data as any)?.agent_output || (fallbackAgent(incident).agent_output as Record<string, unknown>),
