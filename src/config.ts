@@ -163,7 +163,7 @@ export const config = {
     } satisfies ServiceConfig,
     cctv: {
       name: 'cctv',
-      baseUrl: firstEnv(['CCTV_PERCEPTION_URL', 'CCTV_URL'], 'http://localhost:8004'),
+      baseUrl: firstEnv(['CCTV_PERCEPTION_URL', 'CCTV_URL']),
       healthPath: '/health',
       defaultHeaders: {
         'X-Internal-Key': firstEnv(['CCTV_INTERNAL_KEY', 'INTERNAL_API_KEY'])
