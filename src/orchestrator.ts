@@ -745,8 +745,13 @@ function buildTriageJobs(incidentType: string, severity: number, locationKnown: 
     jobs.push({ service: 'proximity_finder', priority: 2, parameters: { search_radius_km: locationKnown ? 5 : 10 } });
   }
   if (severity >= 3) {
-    jobs.push({ service: 'inventory_service', priority: 3, parameters: { request_type: 'readiness_check' } });
-    jobs.push({ service: 'route_calculator', priority: 4, parameters: { estimate_eta: true } });
+    // Names match masterai's real /triage response vocabulary (inventory_check,
+    // route_calculation), not relationship_api's other internal service keys
+    // (inventory, routeCalculator) — this local fallback must agree with the real
+    // AI's job names, since runIncidentOrchestration gates on jobs_needed from
+    // whichever one actually answered.
+    jobs.push({ service: 'inventory_check', priority: 3, parameters: { request_type: 'readiness_check' } });
+    jobs.push({ service: 'route_calculation', priority: 4, parameters: { estimate_eta: true } });
   }
   if (severity >= 4) {
     jobs.push({ service: 'autonomous_control', priority: 5, parameters: { preview_only: true } });
@@ -995,8 +1000,8 @@ async function runIncidentOrchestration(
       // pipeline rather than silently dropping a real incident on the floor.
       jobServices.add('osint_brain');
       jobServices.add('proximity_finder');
-      jobServices.add('inventory_service');
-      jobServices.add('route_calculator');
+      jobServices.add('inventory_check');
+      jobServices.add('route_calculation');
     }
 
     if (!needsFullResponse) {
@@ -1033,7 +1038,7 @@ async function runIncidentOrchestration(
       jobServices.has('osint_brain')
         ? callService({ service: 'osint', path: '/brain/query', body: buildOsintPayload(incident), timeoutMs: 12000 })
         : Promise.resolve(skippedServiceResult('osint')),
-      jobServices.has('inventory_service')
+      jobServices.has('inventory_check')
         ? callService({ service: 'inventory', path: '/query', body: buildInventoryPayload(orgId, incident) })
         : Promise.resolve(skippedServiceResult('inventory')),
       jobServices.has('proximity_finder')
@@ -1059,7 +1064,7 @@ async function runIncidentOrchestration(
           .filter(Boolean)
     };
 
-    const routeCalculator = jobServices.has('route_calculator')
+    const routeCalculator = jobServices.has('route_calculation')
       ? await callService({
           service: 'routeCalculator',
           path: '/route/calculate',
