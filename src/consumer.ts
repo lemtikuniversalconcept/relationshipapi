@@ -172,6 +172,12 @@ export function isOnPremises(
   session: ConsumerSession,
   device: { lat?: number; lng?: number; wifiSsid?: string }
 ): boolean {
+  // A session issued without a location (operator picked "Any / unspecified") has no
+  // coordinates to check against — that's an operator choice not to geofence this
+  // code, not a reason to reject every guest who uses it.
+  const hasGeofence = typeof session.premises_lat === 'number' && typeof session.premises_lng === 'number';
+  if (!hasGeofence && !session.wifi_ssids?.length) return true;
+
   const gpsPass =
     typeof device.lat === 'number' &&
     typeof device.lng === 'number' &&

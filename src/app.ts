@@ -4244,12 +4244,29 @@ app.post(['/consumer/session/issue', '/api/v1/consumer/session/issue'], {
     return reply.code(400).send({ status: 'error', error: 'A real organisation is required to issue a consumer session' });
   }
 
+  // The geofence check reads premises_lat/lng off the session row itself, not via a
+  // join at validation time — location_id alone was being stored with no coordinates
+  // ever copied onto the session, so every session's geofence check saw null/null and
+  // failed as "outside_premises" regardless of where the guest actually was.
+  let premisesLat: number | null = null;
+  let premisesLng: number | null = null;
+  if (body.location_id) {
+    const [location] = await supabaseSelect<{ coord_x: number | null; coord_y: number | null }>(
+      'organisation_locations',
+      { id: `eq.${body.location_id}`, select: 'coord_x,coord_y', limit: '1' }
+    );
+    premisesLat = location?.coord_y ?? null;
+    premisesLng = location?.coord_x ?? null;
+  }
+
   const token = generateConsumerToken();
   const session = await supabaseInsert<ConsumerSession & { premises_radius_m: number }>('consumer_sessions', {
     organisation_id: orgId,
     location_id: body.location_id || null,
     token,
     guest_reference: body.guest_reference || null,
+    premises_lat: premisesLat,
+    premises_lng: premisesLng,
     premises_radius_m: config.consumerSessionDefaultRadiusM,
     expires_at: body.expires_at,
     // principal.sub is the shared dashboard credential's own label when called via
