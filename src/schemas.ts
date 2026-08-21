@@ -743,7 +743,8 @@ export const consumerSessionIssueSchema = z.object({
   org_id: z.string().optional(),
   location_id: z.string().optional(),
   guest_reference: z.string().optional(),
-  expires_at: z.string()
+  expires_at: z.string(),
+  created_by: z.string().uuid().optional()
 });
 
 export const consumerSessionActivateSchema = z.object({

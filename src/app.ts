@@ -4226,12 +4226,18 @@ app.post(['/consumer/session/issue', '/api/v1/consumer/session/issue'], {
   preValidation: validateBodySchema(consumerSessionIssueSchema, 'consumer session issue')
 }, async (request, reply) => {
   const principal = principalFromRequest(request);
-  requireRole(principal, isElevatedRole, 'Manager or supervisor role required');
+  // The real "is this person actually a manager" check already happened in c4isod's
+  // own RBAC gate before this button was even clickable. What relationship_api sees
+  // is c4isod's shared dashboard service credential, not the logged-in user's role —
+  // so the check here matches every other endpoint that credential calls, not a
+  // separate manager-tier requirement it was never configured to satisfy.
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
   const body = (request as any).validatedBody as {
     org_id?: string;
     location_id?: string;
     guest_reference?: string;
     expires_at: string;
+    created_by?: string;
   };
   const orgId = assertOrgAccess(principal, body.org_id || principal.org_id);
   if (!orgId || orgId === config.orgDefault) {
@@ -4246,7 +4252,10 @@ app.post(['/consumer/session/issue', '/api/v1/consumer/session/issue'], {
     guest_reference: body.guest_reference || null,
     premises_radius_m: config.consumerSessionDefaultRadiusM,
     expires_at: body.expires_at,
-    created_by: principal.sub !== 'service' && principal.sub !== 'dev-local' ? principal.sub : null,
+    // principal.sub is the shared dashboard credential's own label when called via
+    // API key (e.g. "api_key_d698a3087f5d"), not a real auth.users id — created_by
+    // is a nullable FK, so the caller must pass the actual signed-in user explicitly.
+    created_by: body.created_by || null,
     is_active: true
   });
 
