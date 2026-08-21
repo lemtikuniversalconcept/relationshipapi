@@ -289,6 +289,12 @@ export function pushAudit(entry: AuditEntry, auditLogPath: string): void {
   const orgIdVal = isUuid(entry.org_id) ? entry.org_id : null;
   const entityIdVal = isUuid(entry.ai_operation_id) ? entry.ai_operation_id : null;
 
+  // No resolvable tenant (e.g. health checks, or a request whose org couldn't be
+  // determined) — the local append-only log above already recorded it immutably.
+  // Skipping the Supabase mirror here avoids a guaranteed FK failure from writing a
+  // placeholder org id that doesn't exist in `organisations`.
+  if (!orgIdVal) return;
+
   const dbRecord = {
     id: entry.id,
     actor_id: actorIdVal,

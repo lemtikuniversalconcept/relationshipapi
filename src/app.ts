@@ -1605,6 +1605,14 @@ app.addHook('onResponse', async (request, reply) => {
   const request_id = String(request.headers['x-request-id'] || request.id);
   const statusCode = Number(reply.statusCode || 0);
   const aiAudit = (request as any).aiAudit || {};
+  // Handlers authenticate with a shared internal key that carries no tenant claim, so
+  // principal?.org_id is usually empty even though the request body names a real org
+  // (e.g. incident intake, proximity find). Fall back to the body/query org_id so the
+  // audit trail still attributes the action to the correct tenant.
+  const resolvedOrgId =
+    principal?.org_id ||
+    (request.body as Record<string, unknown> | undefined)?.org_id ||
+    (request.query as Record<string, unknown> | undefined)?.org_id;
   const audit = {
     id: crypto.randomUUID(),
     request_id,
@@ -1612,7 +1620,7 @@ app.addHook('onResponse', async (request, reply) => {
     path: request.url,
     status_code: statusCode,
     duration_ms: Date.now() - ((request as any).startedAt || Date.now()),
-    org_id: principal?.org_id,
+    org_id: resolvedOrgId,
     role: principal?.role,
     sub: principal?.sub,
     client_name: principal?.client_name,

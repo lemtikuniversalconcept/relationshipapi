@@ -10,6 +10,16 @@ const TABLE_ALIASES: Record<string, string> = {
   audit_logs: 'audit_log'
 };
 
+// Fields on our internal record shapes that have no matching Supabase column. PostgREST
+// rejects the whole insert if any key is unrecognised, so these must be stripped before
+// syncing rather than merely being harmless extras.
+const OMIT_FIELDS: Partial<Record<string, string[]>> = {
+  // IncidentRecord nests the full graph payload under `incident`; the row it's synced
+  // into (created directly by the console app) already has that data under its own
+  // columns, so this key only exists to carry the orchestration output below it.
+  incidents: ['incident']
+};
+
 function canonicalTableName(table: string): string {
   return TABLE_ALIASES[table] || table;
 }
@@ -91,6 +101,9 @@ async function postSupabase<T extends Record<string, unknown>>(table: string, re
   if (!hasExternalBackend('supabase') || !config.supabaseUrl || !config.supabaseServiceKey) return;
   const canonicalTable = canonicalTableName(table);
   const normalizedRecord = normalizeRecordForSupabase(canonicalTable, record);
+  for (const field of OMIT_FIELDS[canonicalTable] || []) {
+    delete (normalizedRecord as Record<string, unknown>)[field];
+  }
   const url = new URL(`/rest/v1/${canonicalTable}`, config.supabaseUrl);
   const key = conflictKeyForTable(canonicalTable, normalizedRecord);
   if (key) url.searchParams.set('on_conflict', key);
