@@ -786,6 +786,11 @@ export const consumerAiQuerySchema = z.object({
   conversation_history: z.array(conversationTurnSchema).optional().default([])
 });
 
+export const consumerIntakeTurnSchema = z.object({
+  transcript: z.string().min(1),
+  conversation_history: z.array(conversationTurnSchema).optional().default([])
+});
+
 export const forensicAiQuerySchema = z.object({
   org_id: z.string(),
   analyst_id: z.string(),

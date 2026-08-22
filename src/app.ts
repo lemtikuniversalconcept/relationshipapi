@@ -52,6 +52,7 @@ import {
   consumerReportSchema,
   consumerReportUpdateSchema,
   consumerAiQuerySchema,
+  consumerIntakeTurnSchema,
   forensicAiQuerySchema,
   toBool,
   toNumber
@@ -67,7 +68,7 @@ import {
   uploadToStorage,
   ConsumerSession
 } from './consumer';
-import { queryMetaAI } from './meta-ai';
+import { queryMetaAI, queryEmergencyIntake } from './meta-ai';
 import { getForensicCase, getForensicTimeline, getForensicEvidence } from './forensic';
 import {
   findRelationshipsByEntity,
@@ -4343,38 +4344,66 @@ app.get(['/consumer/session/validate', '/api/v1/consumer/session/validate'], asy
   return { valid, reason: reason || null };
 });
 
+const CONSUMER_INCIDENT_SELECT =
+  'id,organisation_id,consumer_session_id,status,description,evidence,severity,type,reported_at,acknowledged_at';
+
+async function fetchConsumerIncident(incidentId: string, sessionId: string) {
+  const [incident] = await supabaseSelect<{
+    id: string;
+    organisation_id: string;
+    consumer_session_id: string | null;
+    status: string;
+    description: string | null;
+    evidence: Array<Record<string, unknown>> | null;
+    severity: number;
+    type: string;
+    reported_at: string;
+    acknowledged_at: string | null;
+  }>('incidents', {
+    id: `eq.${incidentId}`,
+    consumer_session_id: `eq.${sessionId}`,
+    select: CONSUMER_INCIDENT_SELECT,
+    limit: '1'
+  });
+  return incident || null;
+}
+
+// Consumer emergencies are folded straight into the same incidents table the rest of
+// the dashboard already reads — no parallel incident type, no new dashboard view. The
+// only thing that marks one out is source='consumer_pwa' plus acknowledged_at being
+// null, which is what the sidebar alert (built client-side) watches for.
 app.post(['/consumer/report', '/api/v1/consumer/report'], {
   preValidation: validateBodySchema(consumerReportSchema, 'consumer report')
 }, async (request, reply) => {
   const session = await requireConsumerSession(request, reply);
   if (!session) return;
   const body = (request as any).validatedBody as {
-    report_type?: string;
     description?: string;
     location_text?: string;
     lat?: number;
     lng?: number;
-    accuracy_m?: number;
     ai_transcription?: string;
-    ai_language?: string;
   };
 
-  const report = await supabaseInsert<{ id: string; status: string }>('consumer_reports', {
-    session_id: session.id,
+  const incident = await supabaseInsert<{ id: string; status: string }>('incidents', {
     organisation_id: session.organisation_id,
-    report_type: body.report_type || 'emergency',
-    description: body.description || null,
-    location_text: body.location_text || null,
-    lat: body.lat ?? null,
-    lng: body.lng ?? null,
-    accuracy_m: body.accuracy_m ?? null,
-    ai_transcription: body.ai_transcription || null,
-    ai_language: body.ai_language || null,
-    status: 'received'
+    location_id: session.location_id || null,
+    consumer_session_id: session.id,
+    source: 'consumer_pwa',
+    type: 'other',
+    severity: 3,
+    status: 'reported',
+    location: body.location_text || 'Guest-reported location',
+    zone: 'Guest emergency',
+    coord_x: body.lng ?? null,
+    coord_y: body.lat ?? null,
+    title: 'Guest emergency report',
+    description: body.description || body.ai_transcription || null,
+    client_visible: true
   });
 
   triageConsumerReport({
-    reportId: report.id,
+    reportId: incident.id,
     orgId: session.organisation_id,
     description: body.description || body.ai_transcription || '',
     locationText: body.location_text,
@@ -4382,7 +4411,7 @@ app.post(['/consumer/report', '/api/v1/consumer/report'], {
     lng: body.lng
   });
 
-  return { report_id: report.id, status: report.status, message: 'Your report has been received. Help is on the way.' };
+  return { report_id: incident.id, status: incident.status, message: 'Your report has been received. Help is on the way.' };
 });
 
 app.patch(['/consumer/report/:report_id', '/api/v1/consumer/report/:report_id'], {
@@ -4391,14 +4420,68 @@ app.patch(['/consumer/report/:report_id', '/api/v1/consumer/report/:report_id'],
   const session = await requireConsumerSession(request, reply);
   if (!session) return;
   const { report_id } = request.params as { report_id: string };
-  const body = (request as any).validatedBody as Record<string, unknown>;
+  const body = (request as any).validatedBody as {
+    description?: string;
+    location_text?: string;
+    lat?: number;
+    lng?: number;
+  };
+  const patch: Record<string, unknown> = {};
+  if (body.description !== undefined) patch.description = body.description;
+  if (body.location_text !== undefined) patch.location = body.location_text;
+  if (body.lat !== undefined) patch.coord_y = body.lat;
+  if (body.lng !== undefined) patch.coord_x = body.lng;
+
   const [updated] = await supabaseUpdate<{ id: string; status: string }>(
-    'consumer_reports',
-    { id: report_id, session_id: session.id },
-    body
+    'incidents',
+    { id: report_id, consumer_session_id: session.id },
+    patch
   );
   if (!updated) return reply.code(404).send({ status: 'error', error: 'Report not found for this session' });
   return { report_id: updated.id, status: updated.status };
+});
+
+app.post(['/consumer/report/:report_id/intake-turn', '/api/v1/consumer/report/:report_id/intake-turn'], {
+  preValidation: validateBodySchema(consumerIntakeTurnSchema, 'consumer intake turn')
+}, async (request, reply) => {
+  const session = await requireConsumerSession(request, reply);
+  if (!session) return;
+  const { report_id } = request.params as { report_id: string };
+  const body = (request as any).validatedBody as {
+    transcript: string;
+    conversation_history: { role: 'user' | 'assistant'; content: string }[];
+  };
+
+  const incident = await fetchConsumerIncident(report_id, session.id);
+  if (!incident) return reply.code(404).send({ status: 'error', error: 'Report not found for this session' });
+
+  const intake = await queryEmergencyIntake({
+    requestId: crypto.randomUUID(),
+    transcript: body.transcript,
+    conversationHistory: body.conversation_history,
+    currentDescription: incident.description || ''
+  });
+
+  const patch: Record<string, unknown> = { description: intake.rewrittenDescription };
+  if (intake.incidentTypeGuess) patch.type = intake.incidentTypeGuess;
+  if (intake.dangerDetected && incident.severity < 5) patch.severity = 5;
+  await supabaseUpdate('incidents', { id: report_id }, patch);
+
+  void supabaseInsert('incident_activity', {
+    incident_id: report_id,
+    organisation_id: incident.organisation_id,
+    actor_name: 'Guest (emergency intake)',
+    kind: 'consumer_intake_turn',
+    message: body.transcript,
+    meta: { spoken_response: intake.spokenResponse, danger_detected: intake.dangerDetected, ai_generated: intake.aiGenerated }
+  }).catch((error) => console.error('intake-turn activity log failed', error));
+
+  return {
+    spoken_response: intake.spokenResponse,
+    follow_up_question: intake.followUpQuestion,
+    danger_detected: intake.dangerDetected,
+    ai_generated: intake.aiGenerated
+  };
 });
 
 app.post(['/consumer/report/:report_id/media', '/api/v1/consumer/report/:report_id/media'], async (request, reply) => {
@@ -4406,13 +4489,8 @@ app.post(['/consumer/report/:report_id/media', '/api/v1/consumer/report/:report_
   if (!session) return;
   const { report_id } = request.params as { report_id: string };
 
-  const [report] = await supabaseSelect<{ id: string }>('consumer_reports', {
-    id: `eq.${report_id}`,
-    session_id: `eq.${session.id}`,
-    select: 'id',
-    limit: '1'
-  });
-  if (!report) return reply.code(404).send({ status: 'error', error: 'Report not found for this session' });
+  const incident = await fetchConsumerIncident(report_id, session.id);
+  if (!incident) return reply.code(404).send({ status: 'error', error: 'Report not found for this session' });
 
   const file = await (request as any).file();
   if (!file) return reply.code(400).send({ status: 'error', error: 'No file provided' });
@@ -4425,29 +4503,42 @@ app.post(['/consumer/report/:report_id/media', '/api/v1/consumer/report/:report_
 
   const buffer = await file.toBuffer();
   const extension = (file.filename || '').split('.').pop() || 'bin';
-  const objectPath = `${report_id}/${mediaType}_${chunkIndex ?? Date.now()}_${crypto.randomUUID()}.${extension}`;
-  await uploadToStorage(config.consumerMediaBucket, objectPath, buffer, file.mimetype || 'application/octet-stream');
+  // Same bucket and path convention (<org_id>/<incident_id>/<filename>) the dashboard's
+  // own evidence uploads already use, so this shows up in the Forensic evidence viewer
+  // for free with no separate consumer-media query.
+  const objectPath = `${incident.organisation_id}/${report_id}/${mediaType}_${chunkIndex ?? Date.now()}_${crypto.randomUUID()}.${extension}`;
+  await uploadToStorage('incident-evidence', objectPath, buffer, file.mimetype || 'application/octet-stream');
 
-  const media = await supabaseInsert<{ id: string; storage_path: string }>('consumer_report_media', {
-    report_id,
-    media_type: mediaType,
-    storage_path: `${config.consumerMediaBucket}/${objectPath}`,
-    chunk_index: chunkIndex
-  });
+  const evidenceItem = {
+    kind: mediaType.startsWith('photo') ? 'image' : mediaType.startsWith('video') ? 'video' : 'audio',
+    name: file.filename || `${mediaType}.${extension}`,
+    path: objectPath,
+    size: buffer.length,
+    legal: false,
+    added_at: new Date().toISOString(),
+    added_by: null,
+    added_by_name: 'Guest (emergency report)',
+    chain_of_custody: [{ at: new Date().toISOString(), action: 'added', actor_id: null, actor_name: 'Guest (emergency report)' }]
+  };
+  const nextEvidence = [...(incident.evidence || []), evidenceItem];
+  await supabaseUpdate('incidents', { id: report_id }, { evidence: nextEvidence });
 
-  return { media_id: media.id, storage_path: media.storage_path };
+  return { media_id: crypto.randomUUID(), storage_path: `incident-evidence/${objectPath}` };
 });
 
 app.get(['/consumer/report/:report_id/status', '/api/v1/consumer/report/:report_id/status'], async (request, reply) => {
   const session = await requireConsumerSession(request, reply);
   if (!session) return;
   const { report_id } = request.params as { report_id: string };
-  const [report] = await supabaseSelect<{ id: string; status: string; created_at: string; incident_id: string | null }>(
-    'consumer_reports',
-    { id: `eq.${report_id}`, session_id: `eq.${session.id}`, select: 'id,status,created_at,incident_id', limit: '1' }
-  );
-  if (!report) return reply.code(404).send({ status: 'error', error: 'Report not found for this session' });
-  return { report_id: report.id, status: report.status, created_at: report.created_at, linked_incident: Boolean(report.incident_id) };
+  const incident = await fetchConsumerIncident(report_id, session.id);
+  if (!incident) return reply.code(404).send({ status: 'error', error: 'Report not found for this session' });
+  return {
+    report_id: incident.id,
+    status: incident.status,
+    created_at: incident.reported_at,
+    linked_incident: true,
+    acknowledged: Boolean(incident.acknowledged_at)
+  };
 });
 
 app.post(['/consumer/ai/query', '/api/v1/consumer/ai/query'], {

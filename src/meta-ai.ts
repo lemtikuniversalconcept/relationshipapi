@@ -58,6 +58,11 @@ export async function queryMetaAI(req: MetaAIRequest): Promise<MetaAIResponse> {
   const result = await callService<ConverseUpstream>({
     service: 'mainAgent',
     path: '/ai/converse',
+    // callService's own default is 3s if this isn't set — nowhere near enough for a
+    // real completion, let alone a Render free-tier cold start. Every other AI call
+    // in orchestrator.ts already uses 12s+ for exactly this reason; this one didn't,
+    // which alone was enough to make conversational AI look broken.
+    timeoutMs: 20000,
     body: {
       request_id: req.requestId,
       mode: req.mode,
@@ -90,6 +95,73 @@ export async function queryMetaAI(req: MetaAIRequest): Promise<MetaAIResponse> {
     confidence: typeof data.confidence === 'number' ? data.confidence : null,
     model: data.model || null,
     modelProvider: data.model_provider || null,
+    aiGenerated: data.model_provider !== 'heuristic-fallback'
+  };
+}
+
+export interface EmergencyIntakeRequest {
+  requestId: string;
+  transcript: string;
+  conversationHistory?: ConversationTurn[];
+  currentDescription: string;
+}
+
+export interface EmergencyIntakeResponse {
+  spokenResponse: string;
+  rewrittenDescription: string;
+  followUpQuestion: string | null;
+  dangerDetected: boolean;
+  incidentTypeGuess: string | null;
+  aiGenerated: boolean;
+}
+
+type EmergencyIntakeUpstream = {
+  status?: string;
+  spoken_response?: string;
+  rewritten_description?: string;
+  follow_up_question?: string | null;
+  danger_detected?: boolean;
+  incident_type_guess?: string | null;
+  model_provider?: string;
+};
+
+// Dedicated endpoint (not /ai/converse) because this needs a different, structured
+// contract — a rewritten description, at most one follow-up question, and a danger
+// flag the frontend uses to switch the guest from speaking to typing — not a free-text
+// chat reply.
+export async function queryEmergencyIntake(req: EmergencyIntakeRequest): Promise<EmergencyIntakeResponse> {
+  const result = await callService<EmergencyIntakeUpstream>({
+    service: 'mainAgent',
+    path: '/ai/emergency-intake',
+    timeoutMs: 20000,
+    body: {
+      request_id: req.requestId,
+      transcript: req.transcript,
+      conversation_history: req.conversationHistory || [],
+      current_description: req.currentDescription
+    }
+  });
+
+  const data = result.data;
+  const hasRealResponse = result.ok && !result.fallback && typeof data?.rewritten_description === 'string';
+
+  if (!hasRealResponse) {
+    return {
+      spokenResponse: 'Help is on the way. Please stay safe.',
+      rewrittenDescription: `${req.currentDescription} ${req.transcript}`.trim(),
+      followUpQuestion: null,
+      dangerDetected: false,
+      incidentTypeGuess: null,
+      aiGenerated: false
+    };
+  }
+
+  return {
+    spokenResponse: data.spoken_response || 'Help is on the way.',
+    rewrittenDescription: data.rewritten_description as string,
+    followUpQuestion: data.follow_up_question || null,
+    dangerDetected: Boolean(data.danger_detected),
+    incidentTypeGuess: data.incident_type_guess || null,
     aiGenerated: data.model_provider !== 'heuristic-fallback'
   };
 }
