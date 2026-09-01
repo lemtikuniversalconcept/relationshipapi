@@ -11,7 +11,6 @@ import {
   AiOperationRecord,
   AutonomousActionLog,
   BridgeRecord,
-  DeviceRecord,
   IdempotencyRecord,
   InventoryAlert,
   GraphEntity,
@@ -33,7 +32,6 @@ const entities = new Map<string, GraphEntity>();
 const relationships = new Map<string, GraphRelationship>();
 const graphEvents: GraphEvent[] = [];
 const idempotencyMap = new Map<string, IdempotencyRecord>();
-const devices = new Map<string, DeviceRecord>();
 const bridges = new Map<string, BridgeRecord>();
 const infrastructure = new Map<string, InfrastructureRecord>();
 const autonomousLogs: AutonomousActionLog[] = [];
@@ -53,7 +51,6 @@ const filePaths = {
   relationships: path.join(dataDir, 'relationships.json'),
   graphEvents: path.join(dataDir, 'graph-events.json'),
   idempotency: path.join(dataDir, 'idempotency.json'),
-  devices: path.join(dataDir, 'devices.json'),
   bridges: path.join(dataDir, 'bridges.json'),
   infrastructure: path.join(dataDir, 'infrastructure.json'),
   autonomousLogs: path.join(dataDir, 'autonomous-logs.json'),
@@ -167,7 +164,6 @@ function hydrateStores(): void {
     [overrides, filePaths.overrides, 'override_id'],
     [entities, filePaths.entities, 'id'],
     [relationships, filePaths.relationships, 'id'],
-    [devices, filePaths.devices, 'id'],
     [bridges, filePaths.bridges, 'id'],
     [infrastructure, filePaths.infrastructure, 'id'],
     [inventoryAlerts, filePaths.inventoryAlerts, 'alert_id'],
@@ -424,21 +420,6 @@ export function setIdempotentResponse(key: string, responseId: string, payloadHa
     createdAt: new Date().toISOString()
   });
   writeJsonFile(filePaths.idempotency, Object.fromEntries(idempotencyMap.entries()));
-}
-
-export function saveDevice(device: DeviceRecord): DeviceRecord {
-  devices.set(device.id, device);
-  persistMap(devices, filePaths.devices);
-  syncSupabaseRecord('devices', device);
-  return device;
-}
-
-export function getDevice(id: string): DeviceRecord | undefined {
-  return devices.get(id);
-}
-
-export function listDevices(): DeviceRecord[] {
-  return [...devices.values()];
 }
 
 export function saveBridge(bridge: BridgeRecord): BridgeRecord {

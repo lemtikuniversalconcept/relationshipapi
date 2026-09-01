@@ -78,7 +78,6 @@ import {
   getApproval,
   getBridge,
   getEntity,
-  getDevice,
   getIncident,
   getIdempotentResponse,
   getIdempotentRecord,
@@ -96,14 +95,12 @@ import {
   getInventoryAlert,
   listInventoryAlerts,
   listOverrides,
-  listDevices,
   listRelationships,
   pushAudit,
   queryAudit,
   saveApproval,
   saveAutonomousLog,
   saveBridge,
-  saveDevice,
   saveEntity,
   saveGraphEvent,
   saveOverride,
@@ -1246,22 +1243,6 @@ function graphNeighbors(
   return { entities: foundEntities, relationships: foundRelationships };
 }
 
-function normalizeDevicePayload(body: any, principal: RequestPrincipal) {
-  return {
-    id: String(body?.id || crypto.randomUUID()),
-    org_id: String(body?.org_id || buildOrg(principal)),
-    name: String(body?.name || 'Unnamed Device'),
-    type: String(body?.type || 'device'),
-    connection_type: String(body?.connection_type || 'REST_API'),
-    supported_actions: Array.isArray(body?.supported_actions) ? body.supported_actions.map(String) : [],
-    status: String(body?.status || 'offline'),
-    connection_details: body?.connection_details || {},
-    metadata: body?.metadata || {},
-    created_at: body?.created_at || now(),
-    updated_at: now()
-  };
-}
-
 function normalizeBridgePayload(body: any, principal: RequestPrincipal) {
   return {
     id: String(body?.id || crypto.randomUUID()),
@@ -1465,7 +1446,26 @@ async function executeAutonomousAction(principal: RequestPrincipal, body: any) {
   requireRole(principal, isElevatedRole, 'Supervisor approval required');
   const parsed = autonomousActionSchema.parse(body || {});
   const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
-  const device = getDevice(parsed.action.target_id);
+  // Org ownership is the one thing autonomouscontroller can't check itself (it has no concept
+  // of orgs) - that's enforced here. Device existence, supported-action, and safety-constraint
+  // validation are deliberately NOT duplicated here: autonomouscontroller's own Safety
+  // Constraints Engine is the single source of truth for that, so this gateway can't drift out
+  // of sync with it the way the old local device copy did.
+  const deviceResult = await callService<any>({
+    service: 'autonomous',
+    path: `/devices/${encodeURIComponent(parsed.action.target_id)}`,
+    method: 'GET',
+    allowFallback: false
+  });
+  if (!deviceResult.ok) {
+    return {
+      request_id: parsed.request_id,
+      status: 'failed',
+      error: deviceResult.error || 'Autonomous controller unreachable',
+      data: { approval_required: false, approval_level: parsed.authorisation.approval_level, pending: false }
+    };
+  }
+  const device = deviceResult.data;
   if (!device) {
     return {
       request_id: parsed.request_id,
@@ -1483,18 +1483,6 @@ async function executeAutonomousAction(principal: RequestPrincipal, body: any) {
       request_id: parsed.request_id,
       status: 'failed',
       error: 'Forbidden',
-      data: {
-        approval_required: false,
-        approval_level: parsed.authorisation.approval_level,
-        pending: false
-      }
-    };
-  }
-  if (device.supported_actions.length && !device.supported_actions.includes(parsed.action.type) && !device.supported_actions.includes(parsed.action.command)) {
-    return {
-      request_id: parsed.request_id,
-      status: 'failed',
-      error: 'Action not supported by device',
       data: {
         approval_required: false,
         approval_level: parsed.authorisation.approval_level,
@@ -1527,7 +1515,8 @@ async function executeAutonomousAction(principal: RequestPrincipal, body: any) {
   const result = await callService({
     service: 'autonomous',
     path: '/execute',
-    body: internalBody
+    body: internalBody,
+    allowFallback: false
   });
   const payload = (result.data as any)?.data || (result.data as any)?.action_result || result.data || {};
   const overrideId = String(payload.active_override_id || crypto.randomUUID());
@@ -1582,24 +1571,26 @@ async function executeAutonomousAction(principal: RequestPrincipal, body: any) {
 async function revertAutonomousOverride(principal: RequestPrincipal, overrideId: string) {
   requireRole(principal, isElevatedRole, 'Supervisor approval required');
   const record = listOverrides().find((entry) => entry.override_id === overrideId);
-  if (record) {
-    record.status = 'reverted';
-    record.revert_at = now();
-  }
   const result = await callService({
     service: 'autonomous',
     path: `/revert/${encodeURIComponent(overrideId)}`,
     method: 'POST',
-    body: { override_id: overrideId }
+    body: { override_id: overrideId },
+    allowFallback: false
   });
+  if (record) {
+    record.status = result.ok ? 'reverted' : 'revert_failed';
+    if (result.ok) record.revert_at = now();
+  }
   return {
-    status: 'success',
+    status: result.ok ? 'success' : 'failed',
+    error: result.ok ? undefined : result.error || 'Autonomous controller unreachable',
     data: {
       override_id: overrideId,
-      success: true,
+      success: result.ok,
       adapter: 'REST_API',
       response: {
-        result: 'ok'
+        result: result.ok ? 'ok' : 'failed'
       },
       local_record: record || null,
       upstream: result.data
@@ -1816,6 +1807,47 @@ async function proxyCctvRequest(
   };
 }
 
+// Devices/actions are physical-security actuation (locks, gates, barriers, PTZ) - unlike the
+// CCTV proxy above, this must never claim a fake "executed"/"confirmed" result on a network
+// failure, so allowFallback is always forced to false here regardless of caller intent.
+async function proxyAutonomousRequest(
+  request: any,
+  servicePath: string,
+  method: 'GET' | 'POST' | 'PUT',
+  body?: unknown
+): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
+  const result = await callService({
+    service: 'autonomous',
+    path: servicePath,
+    method,
+    body,
+    allowFallback: false
+  });
+  (request as any).serviceCalls = [...((request as any).serviceCalls || []), 'autonomous'];
+  return { ok: result.ok, status: result.status, data: result.data, error: result.error };
+}
+
+function normalizeDeviceForController(body: any, orgId: string) {
+  return {
+    id: String(body?.id || crypto.randomUUID()),
+    org_id: orgId,
+    name: String(body?.name || 'Unnamed Device'),
+    type: String(body?.type || 'device'),
+    connection_type: String(body?.connection_type || 'REST_API'),
+    connection_config: body?.connection_config && typeof body.connection_config === 'object' ? body.connection_config : {},
+    supported_actions: Array.isArray(body?.supported_actions) ? body.supported_actions.map(String) : [],
+    building_id: body?.building_id ?? null,
+    manufacturer: body?.manufacturer ?? null,
+    model: body?.model ?? null,
+    lat: typeof body?.lat === 'number' ? body.lat : null,
+    lng: typeof body?.lng === 'number' ? body.lng : null,
+    floor: typeof body?.floor === 'number' ? body.floor : null,
+    zone: body?.zone ?? null,
+    area: body?.area ?? null,
+    status: body?.status ? String(body.status) : 'online'
+  };
+}
+
 async function proxyMainAgentAiRequest(
   request: any,
   servicePath: string,
@@ -1849,7 +1881,10 @@ async function proxyMainAgentAiRequest(
 
 app.get(['/health', '/v1/health', '/api/v1/health'], async () => {
   const bridges = listBridges();
-  const devices = listDevices();
+  // Best-effort, short-timeout device count from the real registry - never blocks or fails the
+  // health check itself if autonomouscontroller is briefly unreachable, it just reports 0.
+  const deviceSnapshot = await callService<any[]>({ service: 'autonomous', path: '/devices', method: 'GET', allowFallback: false, timeoutMs: 2000 });
+  const devices = deviceSnapshot.ok && Array.isArray(deviceSnapshot.data) ? deviceSnapshot.data : [];
   const services: ServiceName[] = ['osint', 'aiAnalysis', 'mainAgent', 'autonomous', 'inventory', 'proximity', 'routeCalculator', 'cctv'];
   const serviceStatus = Object.fromEntries(
     services.map((service) => [
@@ -2332,21 +2367,29 @@ app.post(['/internal/inventory-alert', '/api/v1/internal/inventory-alert'], asyn
   return { ok: true, alert: event };
 });
 
-app.get(['/devices', '/api/v1/devices'], async (request) => {
+// Devices live only in autonomouscontroller's registry (the real DeviceModel + Safety
+// Constraints Engine + connection adapters). relationship_api no longer keeps its own copy -
+// a disconnected shadow store is exactly what let devices "register" here while remaining
+// invisible to the thing that actually executes commands. This is a pure org-scoped proxy:
+// autonomouscontroller has no concept of orgs, so org ownership is enforced here, once, at
+// the single point everything is required to pass through.
+app.get(['/devices', '/api/v1/devices'], async (request, reply) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
-  return {
-    status: 'success',
-    data: listDevices().filter((device) => device.org_id === org)
-  };
+  const result = await proxyAutonomousRequest(request, '/devices', 'GET');
+  if (!result.ok) return reply.code(502).send({ status: 'error', error: result.error || 'Autonomous controller unreachable' });
+  const devices = Array.isArray(result.data) ? result.data : [];
+  return { status: 'success', data: devices.filter((device: any) => device.org_id === org) };
 });
 
 app.get(['/devices/:device_id', '/api/v1/devices/:device_id'], async (request, reply) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const deviceId = String((request.params as Record<string, unknown>).device_id);
-  const device = getDevice(deviceId);
+  const result = await proxyAutonomousRequest(request, `/devices/${encodeURIComponent(deviceId)}`, 'GET');
+  if (!result.ok) return reply.code(502).send({ status: 'error', error: result.error || 'Autonomous controller unreachable' });
+  const device = result.data;
   if (!device) return reply.code(404).send({ status: 'error', error: 'Device not found' });
   if (device.org_id !== buildOrg(principal, device.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
@@ -2354,40 +2397,40 @@ app.get(['/devices/:device_id', '/api/v1/devices/:device_id'], async (request, r
   return { status: 'success', data: device };
 });
 
-app.post(['/devices', '/api/v1/devices'], async (request) => {
+app.post(['/devices', '/api/v1/devices'], async (request, reply) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
-  const device = normalizeDevicePayload(request.body, principal);
-  return { status: 'success', data: saveDevice(device) };
+  const org = assertOrgAccess(principal, String((request.body as any)?.org_id || principal.org_id || config.orgDefault));
+  const device = normalizeDeviceForController(request.body, org);
+  const result = await proxyAutonomousRequest(request, '/devices', 'POST', device);
+  if (!result.ok) return reply.code(502).send({ status: 'error', error: result.error || 'Autonomous controller unreachable' });
+  return { status: 'success', data: result.data };
 });
 
 app.put(['/devices/:device_id', '/api/v1/devices/:device_id'], async (request, reply) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
   const deviceId = String((request.params as Record<string, unknown>).device_id);
-  const existing = getDevice(deviceId);
+  const existingResult = await proxyAutonomousRequest(request, `/devices/${encodeURIComponent(deviceId)}`, 'GET');
+  if (!existingResult.ok) return reply.code(502).send({ status: 'error', error: existingResult.error || 'Autonomous controller unreachable' });
+  const existing = existingResult.data;
   if (!existing) return reply.code(404).send({ status: 'error', error: 'Device not found' });
-  const body = request.body as any;
-  const updated = saveDevice({
-    ...existing,
-    name: String(body?.name || existing.name),
-    type: String(body?.type || existing.type),
-    connection_type: String(body?.connection_type || existing.connection_type),
-    supported_actions: Array.isArray(body?.supported_actions) ? body.supported_actions.map(String) : existing.supported_actions,
-    status: String(body?.status || existing.status),
-    connection_details: body?.connection_details || existing.connection_details || {},
-    metadata: body?.metadata || existing.metadata || {},
-    org_id: existing.org_id || buildOrg(principal),
-    updated_at: now()
-  });
-  return { status: 'success', data: updated };
+  if (existing.org_id !== buildOrg(principal, existing.org_id)) {
+    return reply.code(403).send({ status: 'error', error: 'Forbidden' });
+  }
+  const device = normalizeDeviceForController({ ...existing, ...(request.body as any), id: deviceId }, existing.org_id);
+  const result = await proxyAutonomousRequest(request, `/devices/${encodeURIComponent(deviceId)}`, 'PUT', device);
+  if (!result.ok) return reply.code(502).send({ status: 'error', error: result.error || 'Autonomous controller unreachable' });
+  return { status: 'success', data: result.data };
 });
 
 app.get(['/devices/:device_id/status', '/api/v1/devices/:device_id/status'], async (request, reply) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const deviceId = String((request.params as Record<string, unknown>).device_id);
-  const device = getDevice(deviceId);
+  const result = await proxyAutonomousRequest(request, `/devices/${encodeURIComponent(deviceId)}`, 'GET');
+  if (!result.ok) return reply.code(502).send({ status: 'error', error: result.error || 'Autonomous controller unreachable' });
+  const device = result.data;
   if (!device) return reply.code(404).send({ status: 'error', error: 'Device not found' });
   if (device.org_id !== buildOrg(principal, device.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
@@ -2400,6 +2443,62 @@ app.get(['/devices/:device_id/status', '/api/v1/devices/:device_id/status'], asy
       latest_command_state: listAutonomousLogs(50).find((entry) => entry.device_id === device.id) || null
     }
   };
+});
+
+app.post(['/devices/:device_id/check', '/api/v1/devices/:device_id/check'], async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:read');
+  const deviceId = String((request.params as Record<string, unknown>).device_id);
+  const existingResult = await proxyAutonomousRequest(request, `/devices/${encodeURIComponent(deviceId)}`, 'GET');
+  if (!existingResult.ok) return reply.code(502).send({ status: 'error', error: existingResult.error || 'Autonomous controller unreachable' });
+  const existing = existingResult.data;
+  if (!existing) return reply.code(404).send({ status: 'error', error: 'Device not found' });
+  if (existing.org_id !== buildOrg(principal, existing.org_id)) {
+    return reply.code(403).send({ status: 'error', error: 'Forbidden' });
+  }
+  const result = await proxyAutonomousRequest(request, `/devices/${encodeURIComponent(deviceId)}/check`, 'POST');
+  if (!result.ok) return reply.code(502).send({ status: 'error', error: result.error || 'Autonomous controller unreachable' });
+  return { status: 'success', data: result.data };
+});
+
+// Deliberately separate from executeAutonomousAction/'/api/v1/autonomous/action' above: that
+// route requires an elevated (supervisor/manager/admin) principal role, appropriate for a human
+// supervisor approving a flagged incident action. This route is for the dashboard's own
+// already-authenticated, already-RBAC-checked device control surface (Devices page, Sensors
+// PTZ/on-off) - the write scope check plus the org-ownership check below are the gate; whether
+// the specific action needs a human sign-off is decided entirely by automation_mode and the
+// Safety Constraints Engine inside autonomouscontroller, not by relationship_api's caller role.
+app.post(['/devices/:device_id/execute', '/api/v1/devices/:device_id/execute'], async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:write');
+  const deviceId = String((request.params as Record<string, unknown>).device_id);
+  const body = (request.body as any) || {};
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const existingResult = await proxyAutonomousRequest(request, `/devices/${encodeURIComponent(deviceId)}`, 'GET');
+  if (!existingResult.ok) return reply.code(502).send({ status: 'error', error: existingResult.error || 'Autonomous controller unreachable' });
+  const device = existingResult.data;
+  if (!device) return reply.code(404).send({ status: 'error', error: 'Device not found' });
+  if (device.org_id !== org) return reply.code(403).send({ status: 'error', error: 'Forbidden' });
+
+  const requestId = String(body.request_id || `req-${crypto.randomUUID()}`);
+  const internalBody = {
+    request_type: 'execute_action',
+    request_id: requestId,
+    org_id: org,
+    automation_mode: typeof body.automation_mode === 'number' ? body.automation_mode : undefined,
+    action: {
+      action_key: String(body.action_key || ''),
+      device_id: deviceId,
+      parameters: body.parameters && typeof body.parameters === 'object' ? body.parameters : {}
+    },
+    authorisation: {
+      requested_by: String(body.requested_by || principal.sub || 'dashboard'),
+      incident_id: body.incident_id ?? null
+    }
+  };
+  const result = await proxyAutonomousRequest(request, '/execute', 'POST', internalBody);
+  if (!result.ok) return reply.code(502).send({ status: 'error', request_id: requestId, error: result.error || 'Autonomous controller unreachable' });
+  return { status: 'success', request_id: requestId, data: result.data };
 });
 
 app.get(['/bridges', '/api/v1/bridges'], async (request) => {
@@ -2452,13 +2551,15 @@ app.put(['/bridges/:bridge_id', '/api/v1/bridges/:bridge_id'], async (request, r
 
 app.get(['/health/bridges', '/api/v1/health/bridges'], async () => {
   const bridges = listBridges();
+  const deviceSnapshot = await callService<any[]>({ service: 'autonomous', path: '/devices', method: 'GET', allowFallback: false, timeoutMs: 2000 });
+  const devices = deviceSnapshot.ok && Array.isArray(deviceSnapshot.data) ? deviceSnapshot.data : [];
   return {
     status: 'success',
     data: {
       bridge_count: bridges.length,
       online_bridges: bridges.filter((bridge) => bridge.status === 'online').length,
-      device_count: listDevices().length,
-      online_devices: listDevices().filter((device) => device.status === 'online').length,
+      device_count: devices.length,
+      online_devices: devices.filter((device: any) => device.status === 'online').length,
       status: 'ok'
     }
   };
