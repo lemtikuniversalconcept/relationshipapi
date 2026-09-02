@@ -20,6 +20,7 @@ import {
   qwenRecommendResponseSchema
 } from './schemas';
 import { saveAiApproval, saveAiOperation, saveSession, saveIncident, updateIncident, saveOverride, saveGraphEvent, getAiOperation, recordAiRecommendationActivity } from './store';
+import { haversineDistanceM } from './consumer';
 
 function randomId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
@@ -112,6 +113,62 @@ function buildProximityPayload(orgId: string, incident: Record<string, unknown>)
   };
 }
 
+// Radius within which a device counts as "on the incident's path" when only coordinates are
+// available (no shared floor/zone to match on). 120m covers most single-building footprints
+// without pulling in a neighbouring building on a large campus.
+const DEVICE_PROXIMITY_RADIUS_M = 120;
+
+type DeviceOnPath = Record<string, unknown> & {
+  on_path: boolean;
+  match_reason: 'same_floor' | 'same_zone' | 'within_radius' | 'unlocated' | null;
+  distance_metres?: number;
+};
+
+// Devices don't know about incidents and incidents don't know about devices - this is the one
+// place that correlates a device's registered floor/zone/lat/lng against an incident's location
+// so the master agent (and the dispatch UI) can tell "on the emergency's path" apart from "exists
+// somewhere in this org". Matching is deliberately conservative: floor match beats zone match
+// beats a coordinate radius, and a device with no location data at all is returned (never
+// silently dropped - an operator still needs to see it exists) but flagged on_path:false so nobody
+// mistakes "we don't know where this is" for "it's confirmed clear of the incident".
+function scoreDeviceAgainstLocation(device: Record<string, unknown>, location: Record<string, unknown>): DeviceOnPath {
+  const deviceFloor = typeof device.floor === 'number' ? device.floor : null;
+  const incidentFloor = typeof location.floor === 'number' ? location.floor : null;
+  if (deviceFloor !== null && incidentFloor !== null && deviceFloor === incidentFloor) {
+    return { ...device, on_path: true, match_reason: 'same_floor' };
+  }
+
+  const deviceZone = typeof device.zone === 'string' ? device.zone.trim().toLowerCase() : '';
+  const incidentZone = typeof location.zone === 'string' ? location.zone.trim().toLowerCase() : '';
+  if (deviceZone && incidentZone && deviceZone === incidentZone) {
+    return { ...device, on_path: true, match_reason: 'same_zone' };
+  }
+
+  const deviceLat = typeof device.lat === 'number' ? device.lat : null;
+  const deviceLng = typeof device.lng === 'number' ? device.lng : null;
+  const incidentLat = typeof location.lat === 'number' ? location.lat : null;
+  const incidentLng = typeof location.lng === 'number' ? location.lng : null;
+  if (deviceLat !== null && deviceLng !== null && incidentLat !== null && incidentLng !== null) {
+    const distance = haversineDistanceM(incidentLat, incidentLng, deviceLat, deviceLng);
+    if (distance <= DEVICE_PROXIMITY_RADIUS_M) {
+      return { ...device, on_path: true, match_reason: 'within_radius', distance_metres: Math.round(distance) };
+    }
+    return { ...device, on_path: false, match_reason: null, distance_metres: Math.round(distance) };
+  }
+
+  return { ...device, on_path: false, match_reason: deviceFloor === null && !deviceZone && deviceLat === null ? 'unlocated' : null };
+}
+
+async function fetchDevicesOnPath(orgId: string, incident: Record<string, unknown>): Promise<DeviceOnPath[]> {
+  const result = await callService<unknown[]>({ service: 'autonomous', path: '/devices', method: 'GET', allowFallback: false, timeoutMs: 8000 });
+  if (!result.ok || !Array.isArray(result.data)) return [];
+  const location = (incident.location as Record<string, unknown>) || {};
+  return result.data
+    .filter((device): device is Record<string, unknown> => Boolean(device) && typeof device === 'object' && (device as Record<string, unknown>).org_id === orgId)
+    .map((device) => scoreDeviceAgainstLocation(device, location))
+    .sort((a, b) => Number(b.on_path) - Number(a.on_path));
+}
+
 function buildRoutePayload(orgId: string, incident: Record<string, unknown>, responders: { officers: string[]; vehicles: string[] }) {
   const location = (incident.location as Record<string, unknown>) || {};
   return {
@@ -164,7 +221,8 @@ function buildAgentPayload(
   incident: Record<string, unknown>,
   orgId: string,
   availableServices: string[],
-  approvalOfficerId?: string
+  approvalOfficerId?: string,
+  devicesOnPath?: DeviceOnPath[]
 ): Record<string, unknown> {
   return {
     request_type: 'agent_task',
@@ -178,6 +236,10 @@ function buildAgentPayload(
       location: incident.location
     },
     available_services: availableServices,
+    // Only devices already correlated to this incident's floor/zone/coordinates - see
+    // scoreDeviceAgainstLocation - so the agent isn't reasoning over every device in the org when
+    // it decides what's safe to control automatically.
+    devices_on_path: (devicesOnPath || []).filter((device) => device.on_path),
     constraints: {
       autonomous_actions_require_approval: true,
       max_response_time_seconds: 30,
@@ -1034,7 +1096,7 @@ async function runIncidentOrchestration(
       return;
     }
 
-    const [osint, inventory, proximity] = await Promise.all([
+    const [osint, inventory, proximity, devicesOnPath] = await Promise.all([
       jobServices.has('osint_brain')
         ? callService({ service: 'osint', path: '/brain/query', body: buildOsintPayload(incident), timeoutMs: 12000 })
         : Promise.resolve(skippedServiceResult('osint')),
@@ -1048,7 +1110,10 @@ async function runIncidentOrchestration(
             body: buildProximityPayload(orgId, incident),
             timeoutMs: 12000
           })
-        : Promise.resolve(skippedServiceResult('proximity'))
+        : Promise.resolve(skippedServiceResult('proximity')),
+      jobServices.has('autonomous_control')
+        ? fetchDevicesOnPath(orgId, incident).catch(() => [] as DeviceOnPath[])
+        : Promise.resolve([] as DeviceOnPath[])
     ]);
 
     const responders = {
@@ -1088,7 +1153,7 @@ async function runIncidentOrchestration(
     const agent = await callService({
       service: 'mainAgent',
       path: '/process',
-      body: buildAgentPayload(incident, orgId, ['osint_brain', 'ai_analysis', 'autonomous_control'], principal.sub),
+      body: buildAgentPayload(incident, orgId, ['osint_brain', 'ai_analysis', 'autonomous_control'], principal.sub, devicesOnPath),
       timeoutMs: 12000
     });
 
@@ -1109,6 +1174,7 @@ async function runIncidentOrchestration(
       analysis: (analysis.data as any)?.analysis || (fallbackAnalysis(incident).analysis as Record<string, unknown>),
       dispatch_plan: (agent.data as any)?.agent_output?.dispatch_plan || (fallbackAgent(incident).agent_output as any).dispatch_plan,
       agent_output: (agent.data as any)?.agent_output || (fallbackAgent(incident).agent_output as Record<string, unknown>),
+      devices_on_path: devicesOnPath,
       warnings
     });
 

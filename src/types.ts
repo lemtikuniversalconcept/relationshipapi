@@ -160,6 +160,11 @@ export type IncidentRecord = {
   analysis?: Record<string, unknown>;
   dispatch_plan?: Record<string, unknown>;
   agent_output?: Record<string, unknown>;
+  // Devices whose registered floor/zone/coordinates put them on this incident's path - see
+  // scoreDeviceAgainstLocation in orchestrator.ts. Populated only when the autonomous_control
+  // job runs; includes both on_path and off_path candidates so an operator can see why a device
+  // was or wasn't considered relevant.
+  devices_on_path?: Record<string, unknown>[];
   warnings: string[];
 };
 

@@ -10,6 +10,7 @@ export const locationSchema = z.object({
   description: z.string().optional(),
   building_id: z.string().optional(),
   floor: z.number().optional(),
+  zone: z.string().optional(),
   indoor: z.boolean().optional()
 });
 
