@@ -222,7 +222,7 @@ export async function callService<T = unknown>({
   method = 'POST',
   body,
   headers,
-  timeoutMs = 3000,
+  timeoutMs,
   allowFallback = true,
   retries
 }: CallOptions): Promise<ServiceCallResult<T>> {
@@ -254,7 +254,13 @@ export async function callService<T = unknown>({
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs || config.relationshipApiTimeoutMs || 8000);
+    // timeoutMs had a `= 3000` destructuring default, which meant it was never undefined here
+    // and the `|| config.relationshipApiTimeoutMs || 8000` fallback below it could never fire -
+    // every call that omitted timeoutMs silently got 3s instead of the configured
+    // RELATIONSHIP_API_TIMEOUT_MS (8s), which was enough to abort a full device-list proxy call
+    // under normal load. timeoutMs is now undefined when the caller omits it, so this resolves
+    // as intended: explicit override, else configured default, else 8000 as a last resort.
+    const timeout = setTimeout(() => controller.abort(), timeoutMs ?? config.relationshipApiTimeoutMs ?? 8000);
     try {
       const response = await fetch(new URL(path, svc.baseUrl), {
         method,
