@@ -28,10 +28,10 @@ function serviceConfig(service: ServiceName) {
   return config.services[service];
 }
 
-function buildHeaders(service: ServiceName, headers?: Record<string, string>): Record<string, string> {
+function buildHeaders(service: ServiceName, hasBody: boolean, headers?: Record<string, string>): Record<string, string> {
   const serviceHeaders = serviceConfig(service).defaultHeaders || {};
   return {
-    'Content-Type': 'application/json',
+    ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
     ...serviceHeaders,
     ...(headers || {})
   };
@@ -258,7 +258,7 @@ export async function callService<T = unknown>({
     try {
       const response = await fetch(new URL(path, svc.baseUrl), {
         method,
-        headers: buildHeaders(service, headers),
+        headers: buildHeaders(service, body !== undefined, headers),
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal
       });
