@@ -94,6 +94,14 @@ export const osintBriefSchema = z.object({
   days: z.union([z.string(), z.number()]).optional()
 }).passthrough();
 
+export const observeIncidentSchema = z.object({
+  org_id: z.string().optional(),
+  incident_id: z.string().optional(),
+  lat: z.number(),
+  lng: z.number(),
+  verify_vision: z.boolean().optional()
+});
+
 export const osintIntelligenceListSchema = z.object({
   org_id: z.string().optional(),
   days: z.union([z.string(), z.number()]).optional()

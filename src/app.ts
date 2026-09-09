@@ -9,6 +9,7 @@ import {
   agentTaskSchema,
   approvalSchema,
   autonomousActionSchema,
+  observeIncidentSchema,
   osintAlertDispatchSchema,
   osintBriefSchema,
   osintIntelligenceListSchema,
@@ -2500,6 +2501,91 @@ app.post(['/devices/:device_id/execute', '/api/v1/devices/:device_id/execute'], 
   const result = await proxyAutonomousRequest(request, '/execute', 'POST', internalBody);
   if (!result.ok) return reply.code(502).send({ status: 'error', request_id: requestId, error: result.error || 'Autonomous controller unreachable' });
   return { status: 'success', request_id: requestId, data: result.data };
+});
+
+// "Point the nearest camera at this incident and tell me what it sees" - chains three calls
+// that already exist independently (nearest-camera lookup, PTZ pan, snapshot capture, all in
+// autonomouscontroller; frame analysis in cctvai) into one request an agent or the dashboard can
+// make. Gated the same way /devices/:device_id/execute is - relationships:write, not the
+// elevated-role check on /api/v1/autonomous/action - because cctv_ptz_move and cctv_snapshot are
+// both in autonomouscontroller's MODE_2_AUTOMATED_ACTIONS allowlist (camera pan/capture, no
+// physical actuation), so automation_mode:2 lets them run without a human approval signature.
+// Whether that's still true for a given action is decided by autonomouscontroller's own Safety
+// Constraints Engine either way, not by this route.
+app.post(['/incidents/observe', '/api/v1/incidents/observe'], async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:write');
+  const parsed = observeIncidentSchema.parse(request.body || {});
+  const org = assertOrgAccess(principal, String(parsed.org_id || principal.org_id || config.orgDefault));
+
+  const nearest = await callService<any[]>({
+    service: 'autonomous',
+    path: `/devices/nearest-camera?org_id=${encodeURIComponent(org)}&lat=${parsed.lat}&lng=${parsed.lng}&limit=1`,
+    method: 'GET',
+    allowFallback: false
+  });
+  if (!nearest.ok) {
+    return reply.code(502).send({ status: 'error', error: nearest.error || 'Autonomous controller unreachable' });
+  }
+  const camera = (nearest.data || [])[0];
+  if (!camera) {
+    return { status: 'success', observed: false, reason: 'No camera with PTZ/snapshot capability is registered near this location.' };
+  }
+
+  const panParameters = {
+    bearing_degrees: camera.bearing_degrees,
+    compass_direction: camera.compass_direction,
+    pan_target: { lat: parsed.lat, lng: parsed.lng }
+  };
+  const panResult = await proxyAutonomousRequest(request, '/execute', 'POST', {
+    request_type: 'execute_action',
+    request_id: `observe-pan-${crypto.randomUUID()}`,
+    org_id: org,
+    automation_mode: 2,
+    action: { action_key: 'cctv_ptz_move', device_id: camera.id, parameters: panParameters },
+    authorisation: { requested_by: 'incident-observation', incident_id: parsed.incident_id ?? null }
+  });
+
+  const snapshotResult = await proxyAutonomousRequest(request, '/execute', 'POST', {
+    request_type: 'execute_action',
+    request_id: `observe-snapshot-${crypto.randomUUID()}`,
+    org_id: org,
+    automation_mode: 2,
+    action: { action_key: 'cctv_snapshot', device_id: camera.id, parameters: {} },
+    authorisation: { requested_by: 'incident-observation', incident_id: parsed.incident_id ?? null }
+  });
+
+  const imageBase64 = snapshotResult.data?.data?.response?.image_base64;
+  const contentType = snapshotResult.data?.data?.response?.content_type || 'image/jpeg';
+  if (!snapshotResult.ok || !imageBase64) {
+    return {
+      status: 'success',
+      observed: false,
+      reason: 'Camera did not return a usable snapshot.',
+      camera: { id: camera.id, name: camera.name, distance_metres: camera.distance_metres, compass_direction: camera.compass_direction },
+      pan_result: panResult.data,
+      snapshot_error: snapshotResult.error
+    };
+  }
+
+  const analysis = await proxyCctvRequest(request, '/frames/ingest', 'POST', {
+    org_id: org,
+    camera_id: camera.id,
+    camera_name: camera.name,
+    zone: camera.zone || camera.area || 'Incident response',
+    frame_data: `data:${contentType};base64,${imageBase64}`,
+    event_type: 'manual_operator_verification',
+    verify_vision: parsed.verify_vision ?? true,
+    incident_context: parsed.incident_id ? { incident_id: parsed.incident_id } : {}
+  });
+
+  return {
+    status: 'success',
+    observed: true,
+    camera: { id: camera.id, name: camera.name, distance_metres: camera.distance_metres, compass_direction: camera.compass_direction },
+    pan_result: panResult.data,
+    analysis: analysis.data
+  };
 });
 
 app.get(['/bridges', '/api/v1/bridges'], async (request) => {
