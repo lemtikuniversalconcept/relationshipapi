@@ -94,6 +94,11 @@ export const osintBriefSchema = z.object({
   days: z.union([z.string(), z.number()]).optional()
 }).passthrough();
 
+export const osintIntelligenceListSchema = z.object({
+  org_id: z.string().optional(),
+  days: z.union([z.string(), z.number()]).optional()
+}).passthrough();
+
 export const osintAlertDispatchSchema = z.object({
   org_id: z.string().optional(),
   alert_id: z.string().optional(),

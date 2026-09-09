@@ -11,6 +11,7 @@ import {
   autonomousActionSchema,
   osintAlertDispatchSchema,
   osintBriefSchema,
+  osintIntelligenceListSchema,
   osintBrainQuerySchema,
   osintCollectSchema,
   entitySchema,
@@ -3079,46 +3080,68 @@ app.get(['/sources', '/api/v1/sources'], async (request) => {
     : upstream.data;
 });
 
-app.get(['/briefs', '/api/v1/briefs'], async (request) => {
+app.get(['/briefs', '/api/v1/briefs'], async (request, reply) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const query = osintBriefSchema.parse(request.query || {});
   const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
   const days = toNumber(query.days, 7) || 7;
-  const upstream = await callService({ service: 'osint', path: `/briefs?org_id=${encodeURIComponent(org)}&days=${encodeURIComponent(String(days))}`, method: 'GET' });
-  return upstream.fallback
-    ? {
-        status: 'success',
-        org_id: org,
-        days,
-        latest_brief: {
-          generated_at: now(),
-          summary: `Latest brief for ${org}`,
-          recommended_action: 'monitor'
-        }
-      }
-    : upstream.data;
+  // allowFallback:false is deliberate here - the default fallback returns a fake status:200
+  // placeholder ("Latest brief for {org}") with no markdown field whenever osint is slow or
+  // unreachable, which the dashboard silently rendered as if it were a real empty brief with no
+  // indication anything had failed. A real failure now surfaces as a real error instead.
+  const upstream = await callService({
+    service: 'osint',
+    path: `/briefs?org_id=${encodeURIComponent(org)}&days=${encodeURIComponent(String(days))}`,
+    method: 'GET',
+    allowFallback: false
+  });
+  if (!upstream.ok) {
+    return reply.code(502).send({ status: 'error', error: upstream.error || 'osint unreachable' });
+  }
+  return upstream.data;
 });
 
-app.post(['/briefs/generate', '/api/v1/briefs/generate'], async (request) => {
+app.post(['/briefs/generate', '/api/v1/briefs/generate'], async (request, reply) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
   const body = osintBriefSchema.parse(request.body || {});
   const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const days = toNumber(body.days, 7) || 7;
-  const upstream = await callService({ service: 'osint', path: '/briefs/generate', body: { ...body, org_id: org, days } });
-  return upstream.fallback
-    ? {
-        status: 'success',
-        org_id: org,
-        days,
-        generated_at: now(),
-        brief: {
-          summary: `Generated brief for ${org}`,
-          recommended_action: 'monitor'
-        }
-      }
-    : upstream.data;
+  // Same reasoning as GET /briefs above - a generated brief is presented as authoritative, so a
+  // failure to reach osint must be a real error, not a fake successful "Generated brief" object.
+  const upstream = await callService({
+    service: 'osint',
+    path: '/briefs/generate',
+    body: { ...body, org_id: org, days },
+    allowFallback: false
+  });
+  if (!upstream.ok) {
+    return reply.code(502).send({ status: 'error', error: upstream.error || 'osint unreachable' });
+  }
+  return upstream.data;
+});
+
+app.get(['/osint/intelligence', '/api/v1/osint/intelligence'], async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireScope(principal, 'relationships:read');
+  const query = osintIntelligenceListSchema.parse(request.query || {});
+  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const days = toNumber(query.days, 7) || 7;
+  // osint's real scraped/classified intelligence items - distinct from the dashboard's own
+  // logged incidents table. allowFallback:false for the same reason as the brief routes: this
+  // feeds the "OSINT intelligence feed" page directly, so a real osint outage must be a real
+  // error, not a fake empty success.
+  const upstream = await callService({
+    service: 'osint',
+    path: `/incidents?org_id=${encodeURIComponent(org)}&days=${encodeURIComponent(String(days))}`,
+    method: 'GET',
+    allowFallback: false
+  });
+  if (!upstream.ok) {
+    return reply.code(502).send({ status: 'error', error: upstream.error || 'osint unreachable' });
+  }
+  return upstream.data;
 });
 
 app.post(['/alerts/dispatch', '/api/v1/alerts/dispatch'], async (request) => {
