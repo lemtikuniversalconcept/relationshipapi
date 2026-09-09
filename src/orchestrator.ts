@@ -212,6 +212,12 @@ function buildAnalysisPayload(
       available_officers: inventoryData?.officers?.items || [],
       proximity: proximityData,
       route_calculator: routeData,
+      // What the nearest camera actually saw, if camera_observation was in this incident's
+      // jobs_needed - real object detection and (if requested) Qwen Vision analysis, not a
+      // human-written description. aiAnalysis isn't guaranteed to reason over this field today;
+      // it's surfaced here so it can, and it always reaches the incident record for the
+      // dashboard regardless (see the services.camera_observation write below).
+      camera_observation: context.cameraObservation,
       client_type: (incident as any).client_type || 'unknown'
     }
   };
@@ -1005,6 +1011,93 @@ function skippedServiceResult(service: ServiceCallResult['service']): ServiceCal
   return { ok: true, status: 200, data: { skipped: true, reason: 'not required by AI triage' }, duration_ms: 0, fallback: false, service };
 }
 
+// Shared by the standalone POST /incidents/observe route and runIncidentOrchestration's
+// automatic dispatch below, so "point the nearest camera at this incident" behaves identically
+// whether an agent asks for it explicitly or the pipeline triggers it on a new incident.
+// Never throws - every failure mode (no camera nearby, camera unreachable, snapshot didn't come
+// back) resolves to a result object describing what happened, since this runs inside
+// Promise.all alongside other best-effort service calls that follow the same pattern.
+export async function observeIncidentViaCamera(
+  orgId: string,
+  lat: number,
+  lng: number,
+  incidentId?: string,
+  verifyVision = true
+): Promise<Record<string, unknown>> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { observed: false, reason: 'Incident has no usable location.' };
+  }
+  const nearest = await callService<any[]>({
+    service: 'autonomous',
+    path: `/devices/nearest-camera?org_id=${encodeURIComponent(orgId)}&lat=${lat}&lng=${lng}&limit=1`,
+    method: 'GET',
+    allowFallback: false
+  });
+  if (!nearest.ok) {
+    return { observed: false, reason: nearest.error || 'Autonomous controller unreachable' };
+  }
+  const camera = (nearest.data || [])[0];
+  if (!camera) {
+    return { observed: false, reason: 'No camera with PTZ/snapshot capability is registered near this location.' };
+  }
+
+  const panResult = await callService({
+    service: 'autonomous',
+    path: '/execute',
+    body: {
+      request_type: 'execute_action',
+      request_id: randomId('observe-pan'),
+      org_id: orgId,
+      automation_mode: 2,
+      action: {
+        action_key: 'cctv_ptz_move',
+        device_id: camera.id,
+        parameters: { bearing_degrees: camera.bearing_degrees, compass_direction: camera.compass_direction, pan_target: { lat, lng } }
+      },
+      authorisation: { requested_by: 'incident-observation', incident_id: incidentId ?? null }
+    },
+    allowFallback: false
+  });
+
+  const snapshotResult = await callService({
+    service: 'autonomous',
+    path: '/execute',
+    body: {
+      request_type: 'execute_action',
+      request_id: randomId('observe-snapshot'),
+      org_id: orgId,
+      automation_mode: 2,
+      action: { action_key: 'cctv_snapshot', device_id: camera.id, parameters: {} },
+      authorisation: { requested_by: 'incident-observation', incident_id: incidentId ?? null }
+    },
+    allowFallback: false
+  });
+
+  const imageBase64 = (snapshotResult.data as any)?.data?.response?.image_base64;
+  const contentType = (snapshotResult.data as any)?.data?.response?.content_type || 'image/jpeg';
+  const cameraSummary = { id: camera.id, name: camera.name, distance_metres: camera.distance_metres, compass_direction: camera.compass_direction };
+  if (!snapshotResult.ok || !imageBase64) {
+    return { observed: false, reason: 'Camera did not return a usable snapshot.', camera: cameraSummary, pan_result: panResult.data, snapshot_error: snapshotResult.error };
+  }
+
+  const analysis = await callService({
+    service: 'cctv',
+    path: '/frames/ingest',
+    body: {
+      org_id: orgId,
+      camera_id: camera.id,
+      camera_name: camera.name,
+      zone: camera.zone || camera.area || 'Incident response',
+      frame_data: `data:${contentType};base64,${imageBase64}`,
+      event_type: 'manual_operator_verification',
+      verify_vision: verifyVision,
+      incident_context: incidentId ? { incident_id: incidentId } : {}
+    }
+  });
+
+  return { observed: true, camera: cameraSummary, pan_result: panResult.data, analysis: analysis.data };
+}
+
 async function triageIncident(
   incident: Record<string, unknown>,
   orgId: string
@@ -1096,7 +1189,7 @@ async function runIncidentOrchestration(
       return;
     }
 
-    const [osint, inventory, proximity, devicesOnPath] = await Promise.all([
+    const [osint, inventory, proximity, devicesOnPath, cameraObservation] = await Promise.all([
       jobServices.has('osint_brain')
         ? callService({ service: 'osint', path: '/brain/query', body: buildOsintPayload(incident), timeoutMs: 12000 })
         : Promise.resolve(skippedServiceResult('osint')),
@@ -1113,7 +1206,20 @@ async function runIncidentOrchestration(
         : Promise.resolve(skippedServiceResult('proximity')),
       jobServices.has('autonomous_control')
         ? fetchDevicesOnPath(orgId, incident).catch(() => [] as DeviceOnPath[])
-        : Promise.resolve([] as DeviceOnPath[])
+        : Promise.resolve([] as DeviceOnPath[]),
+      // "Let's see what's actually happening" - nearest-camera pan + snapshot + real detection,
+      // via the same path POST /incidents/observe exposes for a manual/agent-initiated request.
+      // Best-effort like every other slot here: no camera nearby or a capture failure just
+      // yields observed:false, never blocks the rest of the incident pipeline.
+      jobServices.has('camera_observation')
+        ? observeIncidentViaCamera(
+            orgId,
+            Number((incident.location as Record<string, unknown> | undefined)?.lat),
+            Number((incident.location as Record<string, unknown> | undefined)?.lng),
+            String(incident.id || ''),
+            false
+          ).catch((error) => ({ observed: false, reason: error instanceof Error ? error.message : String(error) }))
+        : Promise.resolve({ observed: false, reason: 'not requested by AI triage' })
     ]);
 
     const responders = {
@@ -1141,7 +1247,8 @@ async function runIncidentOrchestration(
       osint,
       inventory,
       proximity,
-      routeCalculator
+      routeCalculator,
+      cameraObservation
     });
     const analysis = await callService({
       service: 'aiAnalysis',
@@ -1170,7 +1277,7 @@ async function runIncidentOrchestration(
     const updated = updateIncident(recordId, {
       status: warnings.length > 0 ? 'degraded' : 'processed',
       updated_at: updatedAt,
-      services: { triage: triageUpstream, osint, inventory, proximity, routeCalculator, analysis, agent },
+      services: { triage: triageUpstream, osint, inventory, proximity, routeCalculator, analysis, agent, camera_observation: cameraObservation },
       analysis: (analysis.data as any)?.analysis || (fallbackAnalysis(incident).analysis as Record<string, unknown>),
       dispatch_plan: (agent.data as any)?.agent_output?.dispatch_plan || (fallbackAgent(incident).agent_output as any).dispatch_plan,
       agent_output: (agent.data as any)?.agent_output || (fallbackAgent(incident).agent_output as Record<string, unknown>),
