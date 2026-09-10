@@ -26,16 +26,10 @@ type ActivityRow = {
   created_at: string;
 };
 
-type ConsumerReportRow = {
+type ConsumerSessionRow = {
   id: string;
-  incident_id: string | null;
-  report_type: string;
-  description: string | null;
-  location_text: string | null;
-  status: string;
-  ai_transcription: string | null;
-  ai_language: string | null;
-  created_at: string;
+  guest_reference: string | null;
+  activated_at: string | null;
 };
 
 type ReidTelemetryRow = {
@@ -81,12 +75,18 @@ async function fetchActivity(incidentId: string): Promise<ActivityRow[]> {
   });
 }
 
-async function fetchConsumerReports(incidentId: string): Promise<ConsumerReportRow[]> {
-  return supabaseSelect<ConsumerReportRow>('consumer_reports', {
-    incident_id: `eq.${incidentId}`,
-    select: 'id,incident_id,report_type,description,location_text,status,ai_transcription,ai_language,created_at',
-    order: 'created_at.asc'
+// consumer_sessions is the only table the guest-report flow still writes on issue/
+// activate — the report itself is folded straight into `incidents` (source, evidence,
+// consumer_session_id) since the Aug 2026 migration, so this is the one lookup left
+// worth doing per case rather than a join against a table the report flow no longer
+// populates.
+async function fetchConsumerSession(sessionId: string): Promise<ConsumerSessionRow | null> {
+  const rows = await supabaseSelect<ConsumerSessionRow>('consumer_sessions', {
+    id: `eq.${sessionId}`,
+    select: 'id,guest_reference,activated_at',
+    limit: '1'
   });
+  return rows[0] || null;
 }
 
 async function fetchAutonomousActions(incidentId: string): Promise<AutonomousLogRow[]> {
@@ -145,9 +145,10 @@ export async function getForensicCase(incidentId: string, orgId: string) {
   const incident = await fetchIncident(incidentId, orgId);
   if (!incident) return null;
 
-  const [activity, consumerReports, autonomousActions, reidTelemetry] = await Promise.all([
+  const isConsumerReport = incident.source === 'consumer_pwa' && Boolean(incident.consumer_session_id);
+  const [activity, consumerSession, autonomousActions, reidTelemetry] = await Promise.all([
     fetchActivity(incidentId),
-    fetchConsumerReports(incidentId),
+    isConsumerReport ? fetchConsumerSession(incident.consumer_session_id as string) : Promise.resolve(null),
     fetchAutonomousActions(incidentId),
     fetchReidTelemetry(orgId, incident.occurred_at || incident.reported_at)
   ]);
@@ -155,7 +156,9 @@ export async function getForensicCase(incidentId: string, orgId: string) {
   return {
     incident,
     officers_involved: (incident.dispatch_plan as any)?.officers_dispatched || [],
-    consumer_reports: consumerReports,
+    consumer_report: isConsumerReport
+      ? { guest_reference: consumerSession?.guest_reference ?? null, activated_at: consumerSession?.activated_at ?? null }
+      : null,
     ai_analyses: buildAiAnalyses(incident, activity),
     reid_telemetry: reidTelemetry,
     autonomous_actions: autonomousActions,
@@ -191,15 +194,23 @@ export async function getForensicTimeline(incidentId: string, orgId: string): Pr
   const incident = await fetchIncident(incidentId, orgId);
   if (!incident) return null;
 
-  const [activity, consumerReports] = await Promise.all([fetchActivity(incidentId), fetchConsumerReports(incidentId)]);
+  const activity = await fetchActivity(incidentId);
 
   const events: TimelineEvent[] = [];
 
+  // Guest-reported incidents have no separate "report" row to surface — the report
+  // IS the incident (folded in directly since the Aug 2026 migration) — so the
+  // opening timeline entry marks that origin instead of a generic "logged" event.
+  // The guest's actual intake conversation still appears below via its own
+  // incident_activity rows (kind: 'consumer_intake_turn').
+  const isConsumerReport = incident.source === 'consumer_pwa';
   events.push({
     timestamp: incident.reported_at,
-    type: 'incident_logged',
-    actor: (incident.reported_by as string) || 'system',
-    summary: `Incident ${incident.code} logged: ${(incident.title as string) || (incident.description as string) || incident.type}`,
+    type: isConsumerReport ? 'consumer_report' : 'incident_logged',
+    actor: isConsumerReport ? 'guest' : (incident.reported_by as string) || 'system',
+    summary: isConsumerReport
+      ? `Incident ${incident.code} reported via the guest emergency app: ${(incident.description as string) || incident.type}`
+      : `Incident ${incident.code} logged: ${(incident.title as string) || (incident.description as string) || incident.type}`,
     detail: { code: incident.code, type: incident.type, severity: incident.severity },
     media_urls: []
   });
@@ -215,28 +226,31 @@ export async function getForensicTimeline(incidentId: string, orgId: string): Pr
     });
   }
 
-  for (const report of consumerReports) {
-    events.push({
-      timestamp: report.created_at,
-      type: 'consumer_report',
-      actor: 'guest',
-      summary: report.ai_transcription || report.description || `${report.report_type} report received`,
-      detail: { status: report.status, location_text: report.location_text, language: report.ai_language },
-      media_urls: []
-    });
-  }
-
   events.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   return events;
 }
 
 const INCIDENT_EVIDENCE_BUCKET = 'incident-evidence';
 
+// Named (not Record<string, unknown>) so spreading an item below carries its fields
+// into the result type — TS drops all properties of a spread index-signature type.
+type EvidenceItem = {
+  kind: string;
+  name: string;
+  path: string;
+  size: number;
+  legal: boolean;
+  added_at: string;
+  added_by: string | null;
+  added_by_name: string | null;
+  chain_of_custody?: unknown;
+};
+
 export async function getForensicEvidence(incidentId: string, orgId: string) {
   const incident = await fetchIncident(incidentId, orgId);
   if (!incident) return null;
 
-  const rawEvidence = (incident.evidence as Array<Record<string, unknown>>) || [];
+  const rawEvidence = (incident.evidence as EvidenceItem[]) || [];
   const caseFiles = await Promise.all(
     rawEvidence.map(async (item) => ({
       ...item,
@@ -258,31 +272,19 @@ export async function getForensicEvidence(incidentId: string, orgId: string) {
       }))
   );
 
-  const consumerReports = await fetchConsumerReports(incidentId);
-  let consumerMedia: Array<Record<string, unknown>> = [];
-  if (consumerReports.length > 0) {
-    const media = await supabaseSelect<{
-      id: string;
-      report_id: string;
-      media_type: string;
-      storage_path: string;
-      chunk_index: number | null;
-      captured_at: string;
-    }>('consumer_report_media', {
-      report_id: `in.(${consumerReports.map((r) => r.id).join(',')})`,
-      select: '*',
-      order: 'captured_at.asc'
-    });
-    consumerMedia = await Promise.all(
-      media.map(async (item) => {
-        const [bucket, ...rest] = item.storage_path.split('/');
-        return {
-          ...item,
-          signed_url: await signStorageUrlIfNeeded(bucket, rest.join('/'), config.consumerMediaSignedUrlExpirySeconds)
-        };
-      })
-    );
-  }
+  // Guest-submitted photos/audio/video land in this same incident.evidence array as
+  // every other case file (see /consumer/report/:report_id/media) — the dedicated
+  // "Consumer" tab just filters that array back out by who added it, rather than
+  // joining consumer_reports/consumer_report_media, which the report flow stopped
+  // writing to once guest reports were folded directly into incidents.
+  const consumerMedia = caseFiles
+    .filter((item) => item.added_by_name === 'Guest (emergency report)')
+    .map((item) => ({
+      id: item.path,
+      media_type: item.kind === 'image' ? 'photo' : item.kind === 'video' ? 'video_chunk' : 'audio_chunk',
+      captured_at: item.added_at,
+      signed_url: item.signed_url
+    }));
 
   return {
     case_files: caseFiles,

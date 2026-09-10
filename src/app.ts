@@ -4789,7 +4789,7 @@ app.post(['/forensic/ai/query', '/api/v1/forensic/ai/query'], {
       incident: caseSummary.incident,
       officers_involved: caseSummary.officers_involved,
       ai_analyses: caseSummary.ai_analyses,
-      consumer_reports: caseSummary.consumer_reports,
+      consumer_report: caseSummary.consumer_report,
       autonomous_actions: caseSummary.autonomous_actions
     },
     conversationHistory: body.conversation_history
