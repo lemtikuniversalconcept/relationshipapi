@@ -1,5 +1,33 @@
-import { supabaseSelect, signStorageUrlIfNeeded } from './consumer';
+import { supabaseSelect, supabaseInsert, signStorageUrlIfNeeded } from './consumer';
 import { config } from './config';
+
+// Evidence chain-of-custody already tracks who ADDED each item; nothing tracked who
+// VIEWED a case or its evidence, which matters just as much for a tool whose whole
+// point is being defensible under scrutiny. Fire-and-forget and best-effort: a
+// missing/malformed analyst id (e.g. an older dashboard build that hasn't been
+// redeployed yet) should never block the analyst from actually seeing the case.
+export type ForensicViewAction = 'forensic_case_viewed' | 'forensic_timeline_viewed' | 'forensic_evidence_viewed';
+
+export async function logForensicAccess(params: {
+  analystId: string | null | undefined;
+  orgId: string;
+  incidentId: string;
+  action: ForensicViewAction;
+}): Promise<void> {
+  if (!params.analystId) return;
+  try {
+    await supabaseInsert('audit_log', {
+      actor_id: params.analystId,
+      entity: 'incident',
+      entity_id: params.incidentId,
+      action: params.action,
+      details: { via: 'forensic_portal' },
+      organisation_id: params.orgId
+    });
+  } catch (error) {
+    console.error('forensic access audit log failed', { action: params.action, incidentId: params.incidentId, error });
+  }
+}
 
 type IncidentRow = Record<string, unknown> & {
   id: string;

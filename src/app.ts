@@ -71,7 +71,7 @@ import {
   ConsumerSession
 } from './consumer';
 import { queryMetaAI, queryEmergencyIntake } from './meta-ai';
-import { getForensicCase, getForensicTimeline, getForensicEvidence } from './forensic';
+import { getForensicCase, getForensicTimeline, getForensicEvidence, logForensicAccess } from './forensic';
 import {
   findRelationshipsByEntity,
   getAiOperation,
@@ -4722,13 +4722,13 @@ app.post(['/consumer/ai/query', '/api/v1/consumer/ai/query'], {
 // Forensic analyst read views
 // ---------------------------------------------------------------------------
 
-function requireForensicOrg(request: any): { orgId: string } | null {
+function requireForensicOrg(request: any): { orgId: string; analystId: string | null } | null {
   const principal = principalFromRequest(request);
   requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
   const query = (request.query || {}) as Record<string, string>;
   const orgId = assertOrgAccess(principal, query.org_id || principal.org_id);
   if (!orgId || orgId === config.orgDefault) return null;
-  return { orgId };
+  return { orgId, analystId: query.analyst_id || null };
 }
 
 app.get(['/forensic/case/:incident_id', '/api/v1/forensic/case/:incident_id'], async (request, reply) => {
@@ -4737,6 +4737,7 @@ app.get(['/forensic/case/:incident_id', '/api/v1/forensic/case/:incident_id'], a
   const { incident_id } = request.params as { incident_id: string };
   const result = await getForensicCase(incident_id, ctx.orgId);
   if (!result) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
+  void logForensicAccess({ analystId: ctx.analystId, orgId: ctx.orgId, incidentId: incident_id, action: 'forensic_case_viewed' });
   return { status: 'success', ...result };
 });
 
@@ -4746,6 +4747,7 @@ app.get(['/forensic/timeline/:incident_id', '/api/v1/forensic/timeline/:incident
   const { incident_id } = request.params as { incident_id: string };
   const timeline = await getForensicTimeline(incident_id, ctx.orgId);
   if (!timeline) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
+  void logForensicAccess({ analystId: ctx.analystId, orgId: ctx.orgId, incidentId: incident_id, action: 'forensic_timeline_viewed' });
   return { status: 'success', timeline };
 });
 
@@ -4755,6 +4757,7 @@ app.get(['/forensic/evidence/:incident_id', '/api/v1/forensic/evidence/:incident
   const { incident_id } = request.params as { incident_id: string };
   const evidence = await getForensicEvidence(incident_id, ctx.orgId);
   if (!evidence) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
+  void logForensicAccess({ analystId: ctx.analystId, orgId: ctx.orgId, incidentId: incident_id, action: 'forensic_evidence_viewed' });
   return { status: 'success', ...evidence };
 });
 
