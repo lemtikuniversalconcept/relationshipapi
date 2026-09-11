@@ -802,7 +802,8 @@ export const consumerAiQuerySchema = z.object({
 
 export const consumerIntakeTurnSchema = z.object({
   transcript: z.string().min(1),
-  conversation_history: z.array(conversationTurnSchema).optional().default([])
+  conversation_history: z.array(conversationTurnSchema).optional().default([]),
+  language: z.string().optional()
 });
 
 export const forensicAiQuerySchema = z.object({
@@ -812,4 +813,11 @@ export const forensicAiQuerySchema = z.object({
   query: z.string().min(1),
   mode: z.enum(['plain', 'technical']).optional().default('plain'),
   conversation_history: z.array(conversationTurnSchema).optional().default([])
+});
+
+export const forensicNoteSchema = z.object({
+  org_id: z.string(),
+  analyst_id: z.string(),
+  analyst_name: z.string().min(1),
+  note: z.string().min(1).max(4000)
 });

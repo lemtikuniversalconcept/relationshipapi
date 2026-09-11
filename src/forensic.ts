@@ -194,6 +194,28 @@ export async function getForensicCase(incidentId: string, orgId: string) {
   };
 }
 
+// Analyst notes go into the same incident_activity table every other timeline event
+// already comes from — no new table needed, and it means a note shows up in the
+// timeline (getForensicTimeline) for free the moment it's added, in the same place
+// an analyst is already looking.
+export async function addForensicNote(
+  incidentId: string,
+  orgId: string,
+  params: { analystId: string; analystName: string; note: string }
+): Promise<{ id: string; created_at: string } | null> {
+  const incident = await fetchIncident(incidentId, orgId);
+  if (!incident) return null;
+  return supabaseInsert<{ id: string; created_at: string }>('incident_activity', {
+    incident_id: incidentId,
+    organisation_id: orgId,
+    actor_id: params.analystId,
+    actor_name: params.analystName,
+    kind: 'forensic_note',
+    message: params.note,
+    meta: {}
+  });
+}
+
 const TIMELINE_KIND_MAP: Record<string, string> = {
   status_changed: 'status_changed',
   autonomous_action: 'autonomous_action',
@@ -206,7 +228,8 @@ const TIMELINE_KIND_MAP: Record<string, string> = {
   dispatch_route: 'officer_dispatched',
   evidence_added: 'evidence_added',
   evidence_legal_flagged: 'evidence_legal_flagged',
-  note: 'note'
+  note: 'note',
+  forensic_note: 'forensic_note'
 };
 
 export type TimelineEvent = {

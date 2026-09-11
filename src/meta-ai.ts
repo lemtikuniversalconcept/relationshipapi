@@ -104,6 +104,7 @@ export interface EmergencyIntakeRequest {
   transcript: string;
   conversationHistory?: ConversationTurn[];
   currentDescription: string;
+  language?: string;
 }
 
 export interface EmergencyIntakeResponse {
@@ -138,7 +139,8 @@ export async function queryEmergencyIntake(req: EmergencyIntakeRequest): Promise
       request_id: req.requestId,
       transcript: req.transcript,
       conversation_history: req.conversationHistory || [],
-      current_description: req.currentDescription
+      current_description: req.currentDescription,
+      language: req.language || 'en'
     }
   });
 

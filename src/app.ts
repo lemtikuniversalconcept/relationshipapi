@@ -56,6 +56,7 @@ import {
   consumerAiQuerySchema,
   consumerIntakeTurnSchema,
   forensicAiQuerySchema,
+  forensicNoteSchema,
   toBool,
   toNumber
 } from './schemas';
@@ -71,7 +72,7 @@ import {
   ConsumerSession
 } from './consumer';
 import { queryMetaAI, queryEmergencyIntake } from './meta-ai';
-import { getForensicCase, getForensicTimeline, getForensicEvidence, logForensicAccess } from './forensic';
+import { getForensicCase, getForensicTimeline, getForensicEvidence, addForensicNote, logForensicAccess } from './forensic';
 import {
   findRelationshipsByEntity,
   getAiOperation,
@@ -4594,6 +4595,7 @@ app.post(['/consumer/report/:report_id/intake-turn', '/api/v1/consumer/report/:r
   const body = (request as any).validatedBody as {
     transcript: string;
     conversation_history: { role: 'user' | 'assistant'; content: string }[];
+    language?: string;
   };
 
   const incident = await fetchConsumerIncident(report_id, session.id);
@@ -4603,7 +4605,8 @@ app.post(['/consumer/report/:report_id/intake-turn', '/api/v1/consumer/report/:r
     requestId: crypto.randomUUID(),
     transcript: body.transcript,
     conversationHistory: body.conversation_history,
-    currentDescription: incident.description || ''
+    currentDescription: incident.description || '',
+    language: body.language
   });
 
   const patch: Record<string, unknown> = { description: intake.rewrittenDescription };
@@ -4739,6 +4742,31 @@ app.get(['/forensic/case/:incident_id', '/api/v1/forensic/case/:incident_id'], a
   if (!result) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
   void logForensicAccess({ analystId: ctx.analystId, orgId: ctx.orgId, incidentId: incident_id, action: 'forensic_case_viewed' });
   return { status: 'success', ...result };
+});
+
+app.post(['/forensic/case/:incident_id/note', '/api/v1/forensic/case/:incident_id/note'], {
+  preValidation: validateBodySchema(forensicNoteSchema, 'forensic note')
+}, async (request, reply) => {
+  const principal = principalFromRequest(request);
+  requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
+  const body = (request as any).validatedBody as {
+    org_id: string;
+    analyst_id: string;
+    analyst_name: string;
+    note: string;
+  };
+  const orgId = assertOrgAccess(principal, body.org_id);
+  if (!orgId || orgId === config.orgDefault) {
+    return reply.code(400).send({ status: 'error', error: 'A real organisation is required' });
+  }
+  const { incident_id } = request.params as { incident_id: string };
+  const row = await addForensicNote(incident_id, orgId, {
+    analystId: body.analyst_id,
+    analystName: body.analyst_name,
+    note: body.note
+  });
+  if (!row) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
+  return { status: 'success', id: row.id, created_at: row.created_at };
 });
 
 app.get(['/forensic/timeline/:incident_id', '/api/v1/forensic/timeline/:incident_id'], async (request, reply) => {
