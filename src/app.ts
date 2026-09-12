@@ -328,6 +328,15 @@ function assertOrgAccess(principal: RequestPrincipal, candidate?: string): strin
   return org;
 }
 
+// For a post-fetch ownership check (did this already-loaded record actually belong to
+// the caller's org), comparing recordOrgId against assertOrgAccess(principal, recordOrgId)
+// is always false — a truthy candidate is exactly what that function echoes back on its
+// success path, so the comparison never has a chance to fail. This compares the record's
+// real org directly against the principal's own org instead.
+function isForbiddenOrg(principal: RequestPrincipal, recordOrgId: string | undefined): boolean {
+  return principal.role !== 'service' && Boolean(principal.org_id) && Boolean(recordOrgId) && recordOrgId !== principal.org_id;
+}
+
 function hasScope(principal: RequestPrincipal, scope: string): boolean {
   return principal.scope.includes('*') || principal.scope.includes(scope);
 }
@@ -1162,15 +1171,11 @@ async function buildProximityResult(body: Record<string, unknown>) {
   return response;
 }
 
-function buildOrg(principal: RequestPrincipal, candidate?: string): string {
-  return candidate || principal.org_id || config.orgDefault;
-}
-
 function normalizeEntityPayload(body: any, principal: RequestPrincipal) {
   const parsed = entitySchema.parse(body || {});
   return {
     id: parsed.id || crypto.randomUUID(),
-    org_id: parsed.org_id || buildOrg(principal),
+    org_id: assertOrgAccess(principal, parsed.org_id),
     entity_type: parsed.entity_type || 'unknown',
     name: parsed.name,
     status: parsed.status || 'active',
@@ -1183,7 +1188,7 @@ function normalizeRelationshipPayload(body: any, principal: RequestPrincipal) {
   const parsed = relationshipSchema.parse(body || {});
   return {
     id: parsed.id || crypto.randomUUID(),
-    org_id: parsed.org_id || buildOrg(principal),
+    org_id: assertOrgAccess(principal, parsed.org_id),
     source_entity_id: parsed.source_entity_id,
     target_entity_id: parsed.target_entity_id,
     relationship_type: parsed.relationship_type,
@@ -1250,7 +1255,7 @@ function graphNeighbors(
 function normalizeBridgePayload(body: any, principal: RequestPrincipal) {
   return {
     id: String(body?.id || crypto.randomUUID()),
-    org_id: String(body?.org_id || buildOrg(principal)),
+    org_id: String(assertOrgAccess(principal, body?.org_id)),
     name: String(body?.name || 'Unnamed Bridge'),
     type: String(body?.type || 'bridge'),
     status: String(body?.status || 'offline'),
@@ -1264,7 +1269,7 @@ function normalizeInventoryAlert(body: any, principal: RequestPrincipal) {
   const parsed = inventoryAlertSchema.parse(body || {});
   return {
     ...parsed,
-    org_id: parsed.org_id || buildOrg(principal),
+    org_id: assertOrgAccess(principal, parsed.org_id),
     timestamp: parsed.timestamp || now(),
     affected_resources: parsed.affected_resources || [],
     repeat_alert: parsed.repeat_alert ?? false
@@ -2007,7 +2012,7 @@ app.post(['/api/v1/entities', '/v1/entities'], async (request) => {
 app.get(['/api/v1/entities', '/v1/entities'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || ''));
   const entity_type = String((request.query as Record<string, unknown>).entity_type || '');
   const status = String((request.query as Record<string, unknown>).status || '');
   const items = listEntities().filter((entity) => {
@@ -2026,7 +2031,7 @@ app.get(['/api/v1/entities/:id', '/v1/entities/:id'], async (request, reply) => 
   const id = String((request.params as Record<string, unknown>).id);
   const entity = getEntity(id);
   if (!entity) return reply.code(404).send({ ok: false, error: { code: 'ENTITY_NOT_FOUND', message: 'Entity not found' } });
-  if (entity.org_id !== buildOrg(principal, entity.org_id)) {
+  if (isForbiddenOrg(principal, entity.org_id)) {
     return reply.code(403).send({ ok: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
   }
   return { ok: true, entity };
@@ -2122,7 +2127,7 @@ app.post(['/api/v1/relationships', '/v1/relationships'], async (request) => {
 app.get(['/api/v1/relationships', '/v1/relationships'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || ''));
   const entity_id = String((request.query as Record<string, unknown>).entity_id || '');
   const type = String((request.query as Record<string, unknown>).type || '');
   const status = String((request.query as Record<string, unknown>).status || '');
@@ -2146,7 +2151,7 @@ app.get(['/api/v1/relationships/:id', '/v1/relationships/:id'], async (request, 
   const id = String((request.params as Record<string, unknown>).id);
   const relationship = getRelationship(id);
   if (!relationship) return reply.code(404).send({ ok: false, error: { code: 'RELATIONSHIP_NOT_FOUND', message: 'Relationship not found' } });
-  if (relationship.org_id !== buildOrg(principal, relationship.org_id)) {
+  if (isForbiddenOrg(principal, relationship.org_id)) {
     return reply.code(403).send({ ok: false, error: { code: 'FORBIDDEN', message: 'Forbidden' } });
   }
   return { ok: true, relationship };
@@ -2208,7 +2213,7 @@ app.post(['/api/v1/graph/query', '/v1/graph/query'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const query = graphQuerySchema.parse(request.body || {});
-  const org = buildOrg(principal);
+  const org = assertOrgAccess(principal);
   const graph = graphNeighbors(
     query.root_entity_id,
     org,
@@ -2245,7 +2250,7 @@ app.get(['/api/v1/entities/:id/graph', '/v1/entities/:id/graph'], async (request
         .split(',')
         .map((item) => item.trim())
         .filter(Boolean);
-  const graph = graphNeighbors(id, buildOrg(principal), depth, direction, relationshipTypes, entityTypes, Boolean(query.include_inactive));
+  const graph = graphNeighbors(id, assertOrgAccess(principal), depth, direction, relationshipTypes, entityTypes, Boolean(query.include_inactive));
   return { ok: true, root_entity_id: id, graph };
 });
 
@@ -2268,7 +2273,7 @@ app.get(['/api/v1/entities/:id/relationships', '/v1/entities/:id/relationships']
         .split(',')
         .map((item) => item.trim())
         .filter(Boolean);
-  const graph = graphNeighbors(id, buildOrg(principal), depth, direction, relationshipTypes, entityTypes, Boolean(query.include_inactive));
+  const graph = graphNeighbors(id, assertOrgAccess(principal), depth, direction, relationshipTypes, entityTypes, Boolean(query.include_inactive));
   return { ok: true, entity_id: id, relationships: graph.relationships };
 });
 
@@ -2277,7 +2282,7 @@ app.post(['/api/v1/ingest', '/v1/ingest'], async (request) => {
   requireScope(principal, 'relationships:write');
   const body = request.body as any;
   const eventId = body?.event_id || crypto.randomUUID();
-  const org = body?.org_id || buildOrg(principal);
+  const org = assertOrgAccess(principal, body?.org_id);
   const event = {
     id: eventId,
     org_id: org,
@@ -2325,7 +2330,7 @@ app.post(['/api/v1/events', '/v1/events'], async (request) => {
   const body = request.body as any;
   const event = {
     id: body?.id || crypto.randomUUID(),
-    org_id: body?.org_id || buildOrg(principal),
+    org_id: assertOrgAccess(principal, body?.org_id),
     event_type: body?.event_type || 'event',
     entity_id: body?.entity_id,
     relationship_id: body?.relationship_id,
@@ -2343,7 +2348,7 @@ app.post(['/api/v1/webhooks', '/v1/webhooks'], async (request) => {
   const body = request.body as any;
   const event = {
     id: body?.id || crypto.randomUUID(),
-    org_id: body?.org_id || buildOrg(principal),
+    org_id: assertOrgAccess(principal, body?.org_id),
     event_type: body?.event_type || 'webhook.received',
     entity_id: body?.entity_id,
     relationship_id: body?.relationship_id,
@@ -2362,7 +2367,7 @@ app.post(['/internal/inventory-alert', '/api/v1/internal/inventory-alert'], asyn
   saveInventoryAlert(alert);
   const event = saveGraphEvent({
     id: alert.alert_id,
-    org_id: alert.org_id || buildOrg(principal),
+    org_id: assertOrgAccess(principal, alert.org_id),
     event_type: 'inventory.alert',
     correlation_id: request.headers['x-request-id'] ? String(request.headers['x-request-id']) : undefined,
     payload: alert,
@@ -2380,7 +2385,7 @@ app.post(['/internal/inventory-alert', '/api/v1/internal/inventory-alert'], asyn
 app.get(['/devices', '/api/v1/devices'], async (request, reply) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || ''));
   const result = await proxyAutonomousRequest(request, '/devices', 'GET');
   if (!result.ok) return reply.code(502).send({ status: 'error', error: result.error || 'Autonomous controller unreachable' });
   const devices = Array.isArray(result.data) ? result.data : [];
@@ -2395,7 +2400,7 @@ app.get(['/devices/:device_id', '/api/v1/devices/:device_id'], async (request, r
   if (!result.ok) return reply.code(502).send({ status: 'error', error: result.error || 'Autonomous controller unreachable' });
   const device = result.data;
   if (!device) return reply.code(404).send({ status: 'error', error: 'Device not found' });
-  if (device.org_id !== buildOrg(principal, device.org_id)) {
+  if (isForbiddenOrg(principal, device.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   return { status: 'success', data: device };
@@ -2419,7 +2424,7 @@ app.put(['/devices/:device_id', '/api/v1/devices/:device_id'], async (request, r
   if (!existingResult.ok) return reply.code(502).send({ status: 'error', error: existingResult.error || 'Autonomous controller unreachable' });
   const existing = existingResult.data;
   if (!existing) return reply.code(404).send({ status: 'error', error: 'Device not found' });
-  if (existing.org_id !== buildOrg(principal, existing.org_id)) {
+  if (isForbiddenOrg(principal, existing.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   const device = normalizeDeviceForController({ ...existing, ...(request.body as any), id: deviceId }, existing.org_id);
@@ -2436,7 +2441,7 @@ app.get(['/devices/:device_id/status', '/api/v1/devices/:device_id/status'], asy
   if (!result.ok) return reply.code(502).send({ status: 'error', error: result.error || 'Autonomous controller unreachable' });
   const device = result.data;
   if (!device) return reply.code(404).send({ status: 'error', error: 'Device not found' });
-  if (device.org_id !== buildOrg(principal, device.org_id)) {
+  if (isForbiddenOrg(principal, device.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   return {
@@ -2457,7 +2462,7 @@ app.post(['/devices/:device_id/check', '/api/v1/devices/:device_id/check'], asyn
   if (!existingResult.ok) return reply.code(502).send({ status: 'error', error: existingResult.error || 'Autonomous controller unreachable' });
   const existing = existingResult.data;
   if (!existing) return reply.code(404).send({ status: 'error', error: 'Device not found' });
-  if (existing.org_id !== buildOrg(principal, existing.org_id)) {
+  if (isForbiddenOrg(principal, existing.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   const result = await proxyAutonomousRequest(request, `/devices/${encodeURIComponent(deviceId)}/check`, 'POST');
@@ -2526,7 +2531,7 @@ app.post(['/incidents/observe', '/api/v1/incidents/observe'], async (request) =>
 app.get(['/bridges', '/api/v1/bridges'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || ''));
   return {
     status: 'success',
     data: listBridges().filter((bridge) => bridge.org_id === org)
@@ -2539,7 +2544,7 @@ app.get(['/bridges/:bridge_id', '/api/v1/bridges/:bridge_id'], async (request, r
   const bridgeId = String((request.params as Record<string, unknown>).bridge_id);
   const bridge = getBridge(bridgeId);
   if (!bridge) return reply.code(404).send({ status: 'error', error: 'Bridge not found' });
-  if (bridge.org_id !== buildOrg(principal, bridge.org_id)) {
+  if (isForbiddenOrg(principal, bridge.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   return { status: 'success', data: bridge };
@@ -2565,7 +2570,7 @@ app.put(['/bridges/:bridge_id', '/api/v1/bridges/:bridge_id'], async (request, r
     type: String(body?.type || existing.type),
     status: String(body?.status || existing.status),
     metadata: body?.metadata || existing.metadata || {},
-    org_id: existing.org_id || buildOrg(principal),
+    org_id: assertOrgAccess(principal, existing.org_id),
     updated_at: now()
   });
   return { status: 'success', data: updated };
@@ -2591,7 +2596,7 @@ app.get(['/api/v1/events', '/v1/events'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const query = request.query as Record<string, unknown>;
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   const eventType = String(query.event_type || '');
   const items = listGraphEvents(1000).filter((event) => {
     if (event.org_id !== org) return false;
@@ -2606,7 +2611,7 @@ app.get(['/api/v1/events/stream', '/v1/events/stream'], async (request, reply) =
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const query = request.query as Record<string, unknown>;
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   const eventType = String(query.event_type || '');
   const since = String(query.since || '');
   const requestedLastEventId = String(query.last_event_id || '');
@@ -2665,7 +2670,7 @@ app.get(['/api/v1/events/stream', '/v1/events/stream'], async (request, reply) =
 
 app.get(['/api/v1/overrides/active', '/overrides/active'], async (request) => {
   const principal = principalFromRequest(request);
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || ''));
   return {
     ok: true,
     overrides: listOverrides().filter((override) => override.status === 'active' && (!org || override.org_id === org))
@@ -2715,7 +2720,7 @@ app.post(['/internal/route-push', '/api/v1/internal/route-push'], async (request
   }
   routePushLogs.push({
     route_id: routeId,
-    org_id: String(body?.org_id || principal.org_id || config.orgDefault),
+    org_id: String(assertOrgAccess(principal, body?.org_id)),
     officer_ids: Array.isArray(body?.officer_ids) ? body.officer_ids.map(String) : [],
     timestamp: now(),
     delivered: true,
@@ -2734,7 +2739,7 @@ app.post(['/internal/route-push', '/api/v1/internal/route-push'], async (request
 app.post(['/find', '/api/v1/find', '/api/v1/proximity/find'], async (request) => {
   const principal = principalFromRequest(request);
   const body = proximityRequestSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const payload = { ...body, org_id: org };
   const started = Date.now();
   const upstream = await callService({ service: 'proximity', path: '/find', body: payload });
@@ -2765,7 +2770,7 @@ app.get(['/queries', '/api/v1/queries', '/api/v1/proximity/queries'], async (req
   const principal = principalFromRequest(request);
   const query = queryParamsListSchema.parse(request.query || {});
   const limit = toNumber(query.limit, 20) || 20;
-  const org = buildOrg(principal, query.org_id || principal.org_id || config.orgDefault);
+  const org = assertOrgAccess(principal, query.org_id || principal.org_id || config.orgDefault);
   const upstream = await callService({
     service: 'proximity',
     path: `/queries?limit=${encodeURIComponent(String(limit))}${org ? `&org_id=${encodeURIComponent(org)}` : ''}`,
@@ -2810,7 +2815,7 @@ app.post(['/route/calculate', '/api/v1/route/calculate'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const body = routeUpdateSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const payload = { ...body, org_id: org };
   const upstream = await callService({ service: 'routeCalculator', path: '/route/calculate', body: payload });
   (request as any).serviceCalls = ['routeCalculator'];
@@ -2830,7 +2835,7 @@ app.post(['/route/push', '/api/v1/route/push'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
   const body = routePushSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const route = getRoutePlan(body.route_id);
   if (!route) {
     return {
@@ -2900,7 +2905,7 @@ app.get(['/route/active/:id', '/api/v1/route/active/:id'], async (request, reply
   if (!route) {
     return reply.code(404).send({ status: 'error', error: 'Route not found' });
   }
-  if (route.org_id !== buildOrg(principal, route.org_id)) {
+  if (isForbiddenOrg(principal, route.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   return { status: 'success', data: route };
@@ -2914,7 +2919,7 @@ app.post(['/route/update/:id', '/api/v1/route/update/:id'], async (request, repl
   if (!existing) {
     return reply.code(404).send({ status: 'error', error: 'Route not found' });
   }
-  if (existing.org_id !== buildOrg(principal, existing.org_id)) {
+  if (isForbiddenOrg(principal, existing.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   const body = routeUpdateSchema.parse(request.body || {});
@@ -2933,7 +2938,7 @@ app.get(['/infrastructure/registry', '/api/v1/infrastructure/registry'], async (
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const query = infrastructureQuerySchema.parse(request.query || {});
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   return {
     status: 'success',
     data: listInfrastructure(org)
@@ -2944,7 +2949,7 @@ app.post(['/infrastructure/register', '/api/v1/infrastructure/register'], async 
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
   const body = infrastructureRegisterSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const record = saveInfrastructure({
     id: body.id || crypto.randomUUID(),
     org_id: org,
@@ -3008,7 +3013,7 @@ app.post(['/brain/query', '/api/v1/brain/query'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const body = osintBrainQuerySchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const payload = { ...body, org_id: org };
   const upstream = await callService({ service: 'osint', path: '/brain/query', body: payload });
   (request as any).serviceCalls = ['osint'];
@@ -3019,7 +3024,7 @@ app.post(['/intel/packet', '/api/v1/intel/packet'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const body = osintPacketSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const payload = { ...body, org_id: org };
   const upstream = await callService({ service: 'osint', path: '/intel/packet', body: payload });
   (request as any).serviceCalls = ['osint'];
@@ -3030,7 +3035,7 @@ app.post(['/tasking/resolve', '/api/v1/tasking/resolve'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
   const body = osintTaskResolveSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const payload = { ...body, org_id: org };
   const upstream = await callService({ service: 'osint', path: '/tasking/resolve', body: payload });
   return upstream.fallback
@@ -3053,7 +3058,7 @@ app.post(['/collect', '/api/v1/collect'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
   const body = osintCollectSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const payload = { ...body, org_id: org };
   const upstream = await callService({ service: 'osint', path: '/collect', body: payload });
   return upstream.fallback
@@ -3073,7 +3078,7 @@ app.post(['/sources/:id/collect', '/api/v1/sources/:id/collect'], async (request
   requireScope(principal, 'relationships:write');
   const id = String((request.params as Record<string, unknown>).id);
   const body = osintCollectSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const payload = { ...body, org_id: org, source_id: id };
   const upstream = await callService({ service: 'osint', path: `/sources/${encodeURIComponent(id)}/collect`, body: payload });
   return upstream.fallback
@@ -3090,7 +3095,7 @@ app.post(['/sources/:id/collect', '/api/v1/sources/:id/collect'], async (request
 app.get(['/sources', '/api/v1/sources'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || principal.org_id || config.orgDefault));
   const upstream = await callService({ service: 'osint', path: '/sources', method: 'GET' });
   return upstream.fallback
     ? {
@@ -3105,7 +3110,7 @@ app.get(['/briefs', '/api/v1/briefs'], async (request, reply) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const query = osintBriefSchema.parse(request.query || {});
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   const days = toNumber(query.days, 7) || 7;
   // allowFallback:false is deliberate here - the default fallback returns a fake status:200
   // placeholder ("Latest brief for {org}") with no markdown field whenever osint is slow or
@@ -3127,7 +3132,7 @@ app.post(['/briefs/generate', '/api/v1/briefs/generate'], async (request, reply)
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
   const body = osintBriefSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const days = toNumber(body.days, 7) || 7;
   // Same reasoning as GET /briefs above - a generated brief is presented as authoritative, so a
   // failure to reach osint must be a real error, not a fake successful "Generated brief" object.
@@ -3147,7 +3152,7 @@ app.get(['/osint/intelligence', '/api/v1/osint/intelligence'], async (request, r
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const query = osintIntelligenceListSchema.parse(request.query || {});
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   const days = toNumber(query.days, 7) || 7;
   // osint's real scraped/classified intelligence items - distinct from the dashboard's own
   // logged incidents table. allowFallback:false for the same reason as the brief routes: this
@@ -3169,7 +3174,7 @@ app.post(['/alerts/dispatch', '/api/v1/alerts/dispatch'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
   const body = osintAlertDispatchSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const upstream = await callService({ service: 'osint', path: '/alerts/dispatch', body: { ...body, org_id: org } });
   return upstream.fallback
     ? {
@@ -3215,7 +3220,7 @@ app.post(['/brain/tasks', '/api/v1/brain/tasks'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:write');
   const body = osintTaskSchema.parse(request.body || {});
-  const org = buildOrg(principal, String(body.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(body.org_id || principal.org_id || config.orgDefault));
   const task = upsertOsintTask({
     org_id: org,
     task_type: body.task_type,
@@ -3234,7 +3239,7 @@ app.post(['/brain/tasks', '/api/v1/brain/tasks'], async (request) => {
 app.get(['/brain/tasks', '/api/v1/brain/tasks'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || principal.org_id || config.orgDefault));
   const upstream = await callService({ service: 'osint', path: `/brain/tasks?org_id=${encodeURIComponent(org)}`, method: 'GET' });
   return upstream.fallback
     ? {
@@ -3249,7 +3254,7 @@ app.get(['/brain/tasks/item/:task_id', '/api/v1/brain/tasks/item/:task_id'], asy
   requireScope(principal, 'relationships:read');
   const taskId = String((request.params as Record<string, unknown>).task_id);
   const task = osintTasks.get(taskId);
-  const org = buildOrg(principal, task?.org_id || principal.org_id || config.orgDefault);
+  const org = assertOrgAccess(principal, task?.org_id || principal.org_id || config.orgDefault);
   const upstream = await callService({ service: 'osint', path: `/brain/tasks/item/${encodeURIComponent(taskId)}`, method: 'GET' });
   if (!upstream.fallback) return upstream.data;
   if (!task) {
@@ -3365,7 +3370,7 @@ app.get(['/api/v1/incidents/:id', '/incidents/:id'], async (request, reply) => {
   const id = String((request.params as Record<string, unknown>).id);
   const incident = getIncident(id);
   if (!incident) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
-  if (incident.org_id !== assertOrgAccess(principal, incident.org_id)) {
+  if (isForbiddenOrg(principal, incident.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   return { status: 'success', data: incident };
@@ -3376,7 +3381,7 @@ app.patch(['/api/v1/incidents/:id/status', '/incidents/:id/status'], async (requ
   const id = String((request.params as Record<string, unknown>).id);
   const incident = getIncident(id);
   if (!incident) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
-  if (incident.org_id !== assertOrgAccess(principal, incident.org_id)) {
+  if (isForbiddenOrg(principal, incident.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   const body = request.body as Record<string, unknown>;
@@ -3392,7 +3397,7 @@ app.post(['/api/v1/incidents/:id/analyse', '/incidents/:id/analyse'], async (req
   const id = String((request.params as Record<string, unknown>).id);
   const incident = getIncident(id);
   if (!incident) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
-  if (incident.org_id !== assertOrgAccess(principal, incident.org_id)) {
+  if (isForbiddenOrg(principal, incident.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   return runAnalysis(principal, id, incident.org_id);
@@ -3404,7 +3409,7 @@ app.post(['/api/v1/incidents/:id/dispatch', '/incidents/:id/dispatch'], async (r
   const id = String((request.params as Record<string, unknown>).id);
   const incident = getIncident(id);
   if (!incident) return reply.code(404).send({ status: 'error', error: 'Incident not found' });
-  if (incident.org_id !== assertOrgAccess(principal, incident.org_id)) {
+  if (isForbiddenOrg(principal, incident.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   const body = (request.body as Record<string, unknown>) || {};
@@ -3714,7 +3719,7 @@ app.get(['/ai/operations', '/api/v1/ai/operations'], async (request) => {
   requireScope(principal, 'ai:read');
   const query = request.query as Record<string, unknown>;
   const limit = Math.max(1, Math.min(200, toNumber(query.limit, 50) || 50));
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   return {
     status: 'success',
     data: listAiOperations(limit).filter((operation) => !org || operation.org_id === org)
@@ -3726,7 +3731,7 @@ app.get(['/ai/approvals', '/api/v1/ai/approvals'], async (request) => {
   requireScope(principal, 'ai:read');
   const query = request.query as Record<string, unknown>;
   const limit = Math.max(1, Math.min(200, toNumber(query.limit, 50) || 50));
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   return {
     status: 'success',
     data: listAiApprovals(limit).filter((approval) => !org || approval.org_id === org)
@@ -3741,7 +3746,7 @@ app.get(['/ai/approvals/:id', '/api/v1/ai/approvals/:id'], async (request, reply
   if (!approval) {
     return reply.code(404).send({ status: 'error', error: 'AI approval not found' });
   }
-  if (approval.org_id !== buildOrg(principal, approval.org_id)) {
+  if (isForbiddenOrg(principal, approval.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   return { status: 'success', data: approval };
@@ -3753,7 +3758,7 @@ app.get(['/ai/logs', '/api/v1/ai/logs'], async (request) => {
   requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
   const query = request.query as Record<string, unknown>;
   const limit = Math.max(1, Math.min(250, toNumber(query.limit, 100) || 100));
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   return {
     status: 'success',
     data: listAiLogs(limit).filter((log) => matchesAiLogFilter(log as Record<string, unknown>, query, org))
@@ -3766,7 +3771,7 @@ app.get(['/ai/logs/summary', '/api/v1/ai/logs/summary'], async (request) => {
   requireRole(principal, isAiGatewayRole, 'Operator or admin role required');
   const query = request.query as Record<string, unknown>;
   const limit = Math.max(1, Math.min(500, toNumber(query.limit, 200) || 200));
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   const logs = listAiLogs(limit).filter((log) => matchesAiLogFilter(log as Record<string, unknown>, query, org));
   return {
     status: 'success',
@@ -3785,7 +3790,7 @@ app.get(['/ai/logs/export', '/api/v1/ai/logs/export'], async (request, reply) =>
   const query = request.query as Record<string, unknown>;
   const limit = Math.max(1, Math.min(1000, toNumber(query.limit, 250) || 250));
   const format = String(query.format || 'json').toLowerCase();
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   const logs = listAiLogs(limit).filter((log) => matchesAiLogFilter(log as Record<string, unknown>, query, org));
   if (format === 'csv') {
     reply.header('content-type', 'text/csv; charset=utf-8');
@@ -3811,7 +3816,7 @@ app.get(['/ai/logs/:id', '/api/v1/ai/logs/:id'], async (request, reply) => {
   if (!log) {
     return reply.code(404).send({ status: 'error', error: 'AI log not found' });
   }
-  if (log.org_id !== buildOrg(principal, log.org_id)) {
+  if (isForbiddenOrg(principal, log.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   return { status: 'success', data: log };
@@ -3825,7 +3830,7 @@ app.get(['/ai/operations/:id', '/api/v1/ai/operations/:id'], async (request, rep
   if (!operation) {
     return reply.code(404).send({ status: 'error', error: 'AI operation not found' });
   }
-  if (operation.org_id !== buildOrg(principal, operation.org_id)) {
+  if (isForbiddenOrg(principal, operation.org_id)) {
     return reply.code(403).send({ status: 'error', error: 'Forbidden' });
   }
   return { status: 'success', data: operation };
@@ -3878,7 +3883,7 @@ app.post(['/api/v1/agent/approve/:request_id', '/agent/approve/:request_id'], as
   const body = approvalSchema.parse(request.body || {});
   const approval = saveApproval({
     request_id,
-    org_id: buildOrg(principal, String((request.body as Record<string, unknown>)?.org_id || '')),
+    org_id: assertOrgAccess(principal, String((request.body as Record<string, unknown>)?.org_id || '')),
     incident_id: String((request.body as Record<string, unknown>)?.incident_id || ''),
     approved_by: body.approved_by,
     approval_level: body.approval_level,
@@ -3956,7 +3961,7 @@ app.get(['/api/v1/cameras'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const query = request.query as Record<string, unknown>;
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   const result = await callService({
     service: 'cctv',
     path: org ? `/cameras?org_id=${encodeURIComponent(org)}` : '/cameras',
@@ -4019,7 +4024,7 @@ app.get(['/api/v1/targets/:id'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
   const query = request.query as Record<string, unknown>;
-  const org = buildOrg(principal, String(query.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String(query.org_id || principal.org_id || config.orgDefault));
   const targetId = String((request.params as Record<string, unknown>).id);
   const result = await callService({
     service: 'cctv',
@@ -4128,7 +4133,7 @@ app.post(['/api/v1/ai/generate-summary'], {
 function inventoryUpdateRoute(path: string) {
   return async (request: any) => {
     const principal = principalFromRequest(request);
-    const org = buildOrg(principal, String(request.body?.org_id || principal.org_id || config.orgDefault));
+    const org = assertOrgAccess(principal, String(request.body?.org_id || principal.org_id || config.orgDefault));
     const payload = { ...(request.body || {}), org_id: org };
     const result = await callService({ service: 'inventory', path, body: payload });
     return {
@@ -4151,7 +4156,7 @@ app.post(['/update/threshold', '/api/v1/update/threshold'], inventoryUpdateRoute
 
 app.get(['/alerts/active', '/api/v1/alerts/active'], async (request) => {
   const principal = principalFromRequest(request);
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || ''));
   const upstream = await callService({
     service: 'inventory',
     path: `/alerts/active${org ? `?org_id=${encodeURIComponent(org)}` : ''}`,
@@ -4194,7 +4199,7 @@ app.post(['/alerts/resolve', '/api/v1/alerts/resolve'], async (request) => {
 
 app.post(['/perf/check', '/api/v1/perf/check'], async (request) => {
   const principal = principalFromRequest(request);
-  const org = buildOrg(principal, String((request.body as Record<string, unknown>)?.org_id || principal.org_id || config.orgDefault));
+  const org = assertOrgAccess(principal, String((request.body as Record<string, unknown>)?.org_id || principal.org_id || config.orgDefault));
   const payload = { ...(request.body || {}), org_id: org };
   const result = await callService({ service: 'inventory', path: '/perf/check', body: payload });
   return {
@@ -4219,7 +4224,7 @@ app.post(['/perf/check', '/api/v1/perf/check'], async (request) => {
 app.get(['/api/v1/inventory/alerts', '/inventory/alerts'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || ''));
   return {
     status: 'success',
     data: listInventoryAlerts(org)
@@ -4266,7 +4271,7 @@ app.post(['/revert/:id'], async (request) => {
 app.get(['/api/v1/autonomous/active', '/autonomous/active'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || ''));
   return {
     status: 'success',
     data: listOverrides().filter((entry) => entry.status === 'active' && (!org || entry.org_id === org))
@@ -4287,7 +4292,7 @@ app.get(['/api/v1/audit-log', '/audit-log'], async (request, reply) => {
 app.get(['/log', '/api/v1/log'], async (request) => {
   const principal = principalFromRequest(request);
   requireScope(principal, 'relationships:read');
-  const org = buildOrg(principal, String((request.query as Record<string, unknown>).org_id || ''));
+  const org = assertOrgAccess(principal, String((request.query as Record<string, unknown>).org_id || ''));
   return {
     status: 'success',
     data: {
