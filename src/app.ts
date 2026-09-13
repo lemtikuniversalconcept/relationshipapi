@@ -3863,22 +3863,42 @@ app.post(['/process', '/api/v1/process'], async (request) => {
   return result;
 });
 
+// Session/job payloads come from two different shapes depending on whether they were
+// served from the local fallback cache or masterai's own store (see fetchMasterAiSession/
+// fetchJobStatus) - check every place an org_id plausibly landed rather than one fixed path.
+function extractSessionOrgId(payload: any): string | undefined {
+  return payload?.data?.org_id ?? payload?.data?.session?.org_id ?? payload?.data?.input?.org_id ?? payload?.data?.output?.org_id ?? undefined;
+}
+
 app.get(['/session/:id', '/api/v1/session/:id'], async (request, reply) => {
+  const principal = principalFromRequest(request);
   const requestId = String((request.params as Record<string, unknown>).id);
   const session = await fetchMasterAiSession(requestId);
   if (!session) {
     return reply.code(404).send({ status: 'error', error: 'Session not found' });
   }
+  if (isForbiddenOrg(principal, extractSessionOrgId(session))) {
+    return reply.code(403).send({ status: 'error', error: 'Forbidden' });
+  }
   return session;
 });
 
-app.get(['/api/v1/agent/jobs/:request_id', '/agent/jobs/:request_id'], async (request) => {
+app.get(['/api/v1/agent/jobs/:request_id', '/agent/jobs/:request_id'], async (request, reply) => {
+  const principal = principalFromRequest(request);
   const request_id = String((request.params as Record<string, unknown>).request_id);
-  return fetchJobStatus(request_id);
+  const jobs = await fetchJobStatus(request_id);
+  if (isForbiddenOrg(principal, extractSessionOrgId(jobs))) {
+    return reply.code(403).send({ status: 'error', error: 'Forbidden' });
+  }
+  return jobs;
 });
 
 app.post(['/api/v1/agent/approve/:request_id', '/agent/approve/:request_id'], async (request) => {
   const principal = principalFromRequest(request);
+  // The entire point of a human-approval gate is that someone other than whoever the AI
+  // action would run for signs off on it - without this, any authenticated caller could
+  // approve their own AI-recommended dispatch, which is not an approval gate at all.
+  requireRole(principal, isElevatedRole, 'Supervisor approval required');
   const request_id = String((request.params as Record<string, unknown>).request_id);
   const body = approvalSchema.parse(request.body || {});
   const approval = saveApproval({
