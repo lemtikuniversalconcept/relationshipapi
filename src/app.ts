@@ -4100,7 +4100,17 @@ app.post(['/api/v1/vision/verify'], {
   requireScope(principal, 'relationships:write');
   const body = ((request as any).validatedBody || request.body) as Record<string, unknown>;
   const org = assertOrgAccess(principal, String(body?.org_id || principal.org_id || config.orgDefault));
-  const payload = { ...body, org_id: org };
+  // The dashboard (and every other frame-carrying route here, e.g. /frames/ingest) sends a
+  // single image as frame_data - cctvai's verify_vision only ever reads payload["snapshots"],
+  // an array, so frame_data alone was passing schema validation (passthrough) and then
+  // silently vanishing, always reporting "No snapshots supplied" even with a real image attached.
+  const snapshots = Array.isArray(body?.snapshots) ? (body.snapshots as unknown[]) : [];
+  const frameData = typeof body?.frame_data === 'string' ? body.frame_data : undefined;
+  const payload = {
+    ...body,
+    org_id: org,
+    snapshots: snapshots.length > 0 ? snapshots : frameData ? [frameData] : snapshots
+  };
   return proxyCctvRequest(request, '/vision/verify', 'POST', payload);
 });
 
