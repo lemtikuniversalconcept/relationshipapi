@@ -1,0 +1,25 @@
+Copyright (c) 2026 Lemtik Security. All Rights Reserved.
+
+This repository and its contents (including but not limited to source code,
+documentation, architecture, designs, and assets) are the proprietary and
+confidential property of Lemtik Security.
+
+This code is made publicly viewable for evaluation, demonstration, and review
+purposes only (e.g. hackathon/grant judging, technical due diligence, or
+recruiting). No license, express or implied, is granted to any party to use,
+copy, modify, merge, publish, distribute, sublicense, sell, or create
+derivative works from this software, in whole or in part, for any purpose.
+
+Permitted:
+  - Viewing and reading the source code for evaluation purposes.
+
+Not permitted, without prior written permission from Lemtik Security:
+  - Copying, forking for reuse, or redistributing this code.
+  - Modifying and redistributing this code or any derivative of it.
+  - Using this code, in whole or in part, in another product or service.
+  - Commercial or non-commercial use of this code outside of evaluating
+    Lemtik Security's work.
+
+All rights not expressly granted herein are reserved by Lemtik Security.
+
+For licensing inquiries, contact: amisuhikmot@gmail.com

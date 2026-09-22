@@ -47,3 +47,13 @@ npm start
 - `/ai/analyze-incident`, `/ai/process-radio`, and `/ai/recommend-response` proxy to Qwen when configured and fall back to heuristics when it is not
 - Graph endpoints live under `/v1/entities`, `/v1/relationships`, and `/v1/graph/query`
 - Internal inventory alerts can be posted to `/internal/inventory-alert`
+
+## License
+
+Proprietary — All Rights Reserved. See [LICENSE](./LICENSE). This code is
+shared publicly for evaluation purposes only; it is not licensed for reuse,
+modification, or redistribution.
+
+---
+
+© 2026 Lemtik Security. All rights reserved.
